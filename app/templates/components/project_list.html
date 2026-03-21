@@ -1,0 +1,9 @@
+<div id="project-list">
+    {% if projects %}
+        {% for project in projects %}
+        {% include "components/project_row.html" %}
+        {% endfor %}
+    {% else %}
+        <p class="empty-state">目前沒有歷史紀錄。</p>
+    {% endif %}
+</div>

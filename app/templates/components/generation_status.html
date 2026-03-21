@@ -1,0 +1,5 @@
+<div id="generation-status">
+    {% if project.status.value in ['generating', 'stitching', 'completed', 'failed'] %}
+    {% include "components/video_status.html" %}
+    {% endif %}
+</div>

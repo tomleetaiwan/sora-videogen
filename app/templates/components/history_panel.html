@@ -1,0 +1,21 @@
+<section class="history-panel" id="history-panel">
+    <div class="section-header">
+        <div>
+            <h2>歷史紀錄</h2>
+            <p class="section-subtitle">查看已建立的專案，並集中管理清除動作。</p>
+        </div>
+        <button
+            type="button"
+            class="btn btn-danger"
+            hx-delete="/projects/"
+            hx-target="#history-panel"
+            hx-swap="outerHTML"
+            hx-confirm="確定要清除所有歷史紀錄嗎？這會刪除專案與已生成檔案。"
+            {% if not projects %}disabled{% endif %}
+        >
+            清除歷史紀錄
+        </button>
+    </div>
+
+    {% include "components/project_list.html" %}
+</section>

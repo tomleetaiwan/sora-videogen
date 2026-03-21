@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Projects - Sora VideoGen{% endblock %}
+{% block content %}
+<section class="container">
+    <div class="page-header">
+        <div>
+            <h1>影片生成專案</h1>
+            <p class="page-subtitle">管理已建立的專案，必要時可一鍵清除首頁歷史紀錄。</p>
+        </div>
+    </div>
+
+    {% if entra_auth_status.enabled and not entra_auth_status.ready %}
+    <section class="warning-box">
+        <h2 class="warning-title">Microsoft Entra ID 驗證尚未就緒</h2>
+        <p>{{ entra_auth_status.warning_message }}</p>
+        <div class="warning-list">{% for check in entra_auth_status.failed_checks %}<p class="warning-item"><strong>{{ check.service_name }}</strong>：{{ check.detail }}</p>{% endfor %}</div>
+    </section>
+    {% endif %}
+
+    <form hx-post="/projects/" hx-target="#history-panel" hx-swap="outerHTML" class="url-form">
+        <div class="url-form-row">
+            <input type="url" name="url" placeholder="輸入網址..." required class="url-input">
+            <button type="submit" class="btn btn-primary">建立專案</button>
+        </div>
+        <fieldset class="prompt-language-fieldset">
+            <legend>分鏡 Prompt 語言</legend>
+            <label class="prompt-language-option">
+                <input type="radio" name="video_prompt_language" value="zh-TW" checked>
+                <span>中文</span>
+            </label>
+            <label class="prompt-language-option">
+                <input type="radio" name="video_prompt_language" value="en">
+                <span>English</span>
+            </label>
+        </fieldset>
+    </form>
+
+    {% include "components/history_panel.html" %}
+</section>
+{% endblock %}

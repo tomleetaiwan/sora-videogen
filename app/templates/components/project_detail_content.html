@@ -1,0 +1,79 @@
+{% set project_status_labels = {
+    "pending": "待處理",
+    "scraping": "擷取中",
+    "summarizing": "摘要整理中",
+    "prompts_ready": "提示詞已就緒",
+    "generating": "分鏡產生中",
+    "stitching": "影片串接中",
+    "completed": "已完成",
+    "failed": "生成失敗",
+} %}
+{% set project_status_label = "待串接" if project.status.value == "completed" and not project.final_video_path else project_status_labels[project.status.value] %}
+{% set completed_scenes = project.scenes | selectattr("status.value", "equalto", "completed") | list | length %}
+{% set total_scenes = project.scenes | length %}
+{% set all_scenes_completed = total_scenes > 0 and completed_scenes == total_scenes %}
+
+<section
+    class="container"
+    id="project-detail-content"
+    {% if project.status.value in ["generating", "stitching"] %}
+    hx-get="/projects/{{ project.id }}/content"
+    hx-trigger="every 5s"
+    hx-swap="outerHTML"
+    {% endif %}
+>
+    <a href="/projects/" class="back-link">← 返回專案列表</a>
+
+    <h1>專案 #{{ project.id }}</h1>
+    <p class="project-url">{{ project.url }}</p>
+    <p class="project-status">狀態：<span class="status-badge status-{{ project.status.value }}">{{ project_status_label }}</span></p>
+
+    {% if project.error_message %}
+    <div class="error-box">{{ project.error_message }}</div>
+    {% endif %}
+
+    {% if project.summary %}
+    <details class="summary-section">
+        <summary>摘要</summary>
+        <p>{{ project.summary }}</p>
+    </details>
+    {% endif %}
+
+    {% if project.scenes %}
+    <div class="project-actions">
+        {% if project.status.value == "prompts_ready" %}
+        <button
+            hx-post="/videos/{{ project.id }}/generate"
+            hx-target="#project-detail-content"
+            hx-swap="outerHTML"
+            class="btn btn-primary"
+        >開始產生分鏡影片</button>
+        <p class="project-action-note">這個步驟只會產生各分鏡旁白與片段，不會自動串接最終影片。</p>
+        {% elif all_scenes_completed and project.status.value not in ["generating", "stitching"] %}
+        <button
+            hx-post="/videos/{{ project.id }}/stitch"
+            hx-target="#project-detail-content"
+            hx-swap="outerHTML"
+            class="btn btn-primary"
+        >{{ "重新串接最終影片" if project.final_video_path else "串接最新影片" }}</button>
+        <p class="project-action-note">ffmpeg 會依目前各分鏡的最新影片與旁白重新輸出單一最終影片。</p>
+        {% endif %}
+    </div>
+
+    <h2>場景提示詞</h2>
+    <div id="scenes-list">
+        {% for prompt in project.scenes %}
+        {% include "components/prompt_card.html" %}
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% include "components/generation_status.html" %}
+
+    {% if project.final_video_path %}
+    <h2>最終影片</h2>
+    <video controls class="final-video">
+        <source src="/media/{{ project.id }}/final_video.mp4" type="video/mp4">
+    </video>
+    {% endif %}
+</section>

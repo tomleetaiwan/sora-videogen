@@ -1,0 +1,54 @@
+<div class="video-status">
+    {% set project_status_labels = {
+        "pending": "待處理",
+        "scraping": "擷取中",
+        "summarizing": "摘要整理中",
+        "prompts_ready": "提示詞已就緒",
+        "generating": "分鏡產生中",
+        "stitching": "影片串接中",
+        "completed": "已完成",
+        "failed": "生成失敗",
+    } %}
+    {% set project_status_label = "待串接" if project.status.value == "completed" and not project.final_video_path else project_status_labels[project.status.value] %}
+    <h3>生成狀態</h3>
+    <p class="status-badge status-{{ project.status.value }}">{{ project_status_label }}</p>
+
+    {% if project.error_message %}
+    <div class="error-box status-error-box">{{ project.error_message }}</div>
+    {% endif %}
+
+    {% if project.scenes %}
+    <div class="progress-bar">
+        {% set completed = project.scenes | selectattr("status.value", "equalto", "completed") | list | length %}
+        {% set total = project.scenes | length %}
+        {% set all_scenes_completed = total > 0 and completed == total %}
+        <div class="progress-fill" style="width: {{ (completed / total * 100) if total else 0 }}%"></div>
+        <span class="progress-text">{{ completed }} / {{ total }} 場景完成</span>
+    </div>
+
+    {% set failed_scenes = project.scenes | selectattr("status.value", "equalto", "failed") | list %}
+    {% if failed_scenes %}
+    <div class="scene-failure-list">
+        <h4>失敗場景</h4>
+        {% for scene in failed_scenes %}
+        <div class="scene-failure-item">
+            <p class="scene-failure-title">場景 #{{ scene.sequence_order + 1 }}</p>
+            {% if scene.video and scene.video.error_message %}
+            <p class="scene-failure-message">{{ scene.video.error_message }}</p>
+            {% else %}
+            <p class="scene-failure-message">此場景生成失敗，但目前沒有更詳細的錯誤訊息。</p>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if all_scenes_completed and not project.final_video_path and project.status.value != 'stitching' %}
+    <p class="status-note">所有分鏡片段都已更新，按下「串接最新影片」後才會輸出最新的最終影片。</p>
+    {% elif project.final_video_path %}
+    <p class="status-note">最終影片已完成，可直接在下方預覽。</p>
+    {% elif project.status.value == 'failed' %}
+    <p class="status-note">可針對失敗場景按下「重新產生片段」，修正後再進行串接。</p>
+    {% endif %}
+    {% endif %}
+</div>

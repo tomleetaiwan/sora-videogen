@@ -1,0 +1,15 @@
+<div class="project-row" id="project-{{ project.id }}">
+    <a href="/projects/{{ project.id }}" class="project-link">
+        <span class="project-id">#{{ project.id }}</span>
+        <span class="project-url-short">{{ project.url[:60] }}{% if project.url|length > 60 %}...{% endif %}</span>
+        <span class="status-badge status-{{ project.status.value }}">{{ project.status.value }}</span>
+    </a>
+    <button
+        type="button"
+        class="btn btn-danger btn-sm project-delete-btn"
+        hx-delete="/projects/{{ project.id }}"
+        hx-target="#history-panel"
+        hx-swap="outerHTML"
+        hx-confirm="確定要刪除此歷史紀錄嗎？這會刪除專案與已生成檔案。"
+    >刪除</button>
+</div>

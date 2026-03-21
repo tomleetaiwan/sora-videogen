@@ -1,0 +1,61 @@
+<div class="prompt-card" id="prompt-{{ prompt.id }}">
+    {% set scene_status_labels = {
+        "pending": "待產生",
+        "generating_audio": "產生旁白中",
+        "generating_video": "產生影片中",
+        "completed": "片段完成",
+        "failed": "片段失敗",
+    } %}
+    <div class="prompt-header">
+        <div class="prompt-header-meta">
+            <span class="prompt-order">#{{ prompt.sequence_order + 1 }}</span>
+            <span class="status-badge status-{{ prompt.status.value }}">{{ scene_status_labels[prompt.status.value] }}</span>
+        </div>
+        <div class="prompt-header-actions">
+            {% if prompt.status.value in ["completed", "failed"] and project.status.value not in ["generating", "stitching"] %}
+            <button
+                hx-post="/videos/{{ prompt.project_id }}/scenes/{{ prompt.id }}/regenerate"
+                hx-target="#project-detail-content"
+                hx-swap="outerHTML"
+                class="btn btn-secondary btn-sm"
+            >重新產生片段</button>
+            {% endif %}
+            <button
+                hx-delete="/prompts/{{ prompt.id }}"
+                hx-target="#prompt-{{ prompt.id }}"
+                hx-swap="outerHTML"
+                hx-confirm="確定要刪除此場景？"
+                class="btn btn-danger btn-sm"
+            >刪除</button>
+        </div>
+    </div>
+    <form
+        hx-put="/prompts/{{ prompt.id }}"
+        hx-target="#prompt-{{ prompt.id }}"
+        hx-swap="outerHTML"
+    >
+        <label for="narration-text-{{ prompt.id }}">旁白文字</label>
+        <textarea id="narration-text-{{ prompt.id }}" name="narration_text" rows="3">{{ prompt.narration_text }}</textarea>
+
+        <label for="video-prompt-{{ prompt.id }}">影片提示詞</label>
+        <textarea id="video-prompt-{{ prompt.id }}" name="video_prompt" rows="3">{{ prompt.video_prompt }}</textarea>
+
+        {% if prompt.duration_estimate %}
+        <div class="scene-metrics">
+            {% if prompt.status.value in ["generating_video", "completed"] %}
+            <p class="duration-chip">實際音訊時長：{{ "%.1f"|format(prompt.duration_estimate) }} 秒</p>
+            {% set requested_video_duration = resolve_video_duration_seconds(prompt.duration_estimate) %}
+            {% if requested_video_duration %}
+            <p class="duration-chip">請求影片秒數：{{ requested_video_duration }} 秒</p>
+            {% endif %}
+            {% else %}
+            <p class="duration-chip">預估旁白時長：{{ "%.1f"|format(prompt.duration_estimate) }} 秒</p>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <div class="prompt-actions">
+            <button type="submit" class="btn btn-secondary btn-sm">儲存修改</button>
+        </div>
+    </form>
+</div>
