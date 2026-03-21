@@ -21,7 +21,7 @@ ruff check .
 ruff format .
 ```
 
-Requires Python 3.11+, ffmpeg in PATH, and an OpenAI API key in `.env`.
+Requires Python 3.11+, a configured media backend in PATH (ffmpeg by default, or gst-launch-1.0 for GStreamer), and an OpenAI API key in `.env`.
 
 ## Architecture
 
@@ -29,7 +29,7 @@ This is a **FastAPI + Jinja2/HTMX** application that converts web articles into 
 
 ### Pipeline Flow
 
-URL → **scraper** → raw text → **summarizer** (GPT-5-mini) → summary → **prompt_generator** (GPT-5-mini) → scene prompts → user edits prompts via web UI → **tts** (OpenAI TTS) → narration audio → **video_generator** (Sora 2) → video segments → **video_stitcher** (ffmpeg) → final video
+URL → **scraper** → raw text → **summarizer** (GPT-5-mini) → summary → **prompt_generator** (GPT-5-mini) → scene prompts → user edits prompts via web UI → **tts** (OpenAI TTS) → narration audio → **video_generator** (Sora 2) → video segments → **media backend** (ffmpeg by default, optional GStreamer) → final video
 
 The pipeline has two phases:
 1. **Preparation** (`start_pipeline`): scrape → summarize → generate prompts → stop for user review
@@ -39,7 +39,7 @@ Both run as `asyncio.create_task` background tasks tracked in `app/tasks/pipelin
 
 ### Video Continuity
 
-Each video's last frame is extracted via ffmpeg and passed as a reference image to the next Sora 2 generation call, ensuring visual continuity across scenes.
+Each video's last frame is extracted via the configured media backend and passed as a reference image to the next Sora 2 generation call, ensuring visual continuity across scenes.
 
 ### Key Directories
 

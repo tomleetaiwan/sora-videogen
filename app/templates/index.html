@@ -17,6 +17,14 @@
     </section>
     {% endif %}
 
+    {% if media_backend_status.enabled and not media_backend_status.ready %}
+    <section class="warning-box">
+        <h2 class="warning-title">GStreamer 媒體後端尚未就緒</h2>
+        <p>{{ media_backend_status.warning_message }}</p>
+        <div class="warning-list">{% for check in media_backend_status.failed_checks %}<p class="warning-item"><strong>{{ check.component_name }}</strong>：{{ check.detail }}</p>{% endfor %}</div>
+    </section>
+    {% endif %}
+
     <form hx-post="/projects/" hx-target="#history-panel" hx-swap="outerHTML" class="url-form">
         <div class="url-form-row">
             <input type="url" name="url" placeholder="輸入網址..." required class="url-input">

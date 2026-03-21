@@ -11,6 +11,7 @@ from app.database import get_db
 from app.models import Project, ProjectStatus, ScenePrompt
 from app.prompt_language import normalize_video_prompt_language
 from app.services.entra_auth import create_default_entra_auth_status
+from app.services.media_backend_health import create_default_media_backend_status
 from app.templating import templates
 from app.tasks.pipeline import get_task_for_project, start_pipeline
 
@@ -49,6 +50,11 @@ async def list_projects(request: Request, db: AsyncSession = Depends(get_db)):
                 request.app.state,
                 "entra_auth_status",
                 create_default_entra_auth_status(),
+            ),
+            "media_backend_status": getattr(
+                request.app.state,
+                "media_backend_status",
+                create_default_media_backend_status(),
             ),
         },
     )
