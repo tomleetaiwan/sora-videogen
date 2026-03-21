@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.config import settings
+from app.services import prompt_generator as prompt_generator_module
 from app.services.prompt_generator import generate_scene_prompts, rewrite_or_split_scene
 
 
@@ -30,6 +31,7 @@ async def test_generate_scene_prompts_returns_scenes():
     assert "duration_estimate" in result[0]
     _, kwargs = mock_client.chat.completions.create.await_args
     assert "Traditional Chinese (繁體中文) prompt for the Sora 2 video model" in kwargs["messages"][0]["content"]
+    assert 'Return JSON in the shape {"scenes": [{"narration_text": "...", "video_prompt": "..."}]}' in kwargs["messages"][0]["content"]
     assert kwargs["max_completion_tokens"] == 4000
     assert "max_tokens" not in kwargs
     assert "temperature" not in kwargs
@@ -145,3 +147,38 @@ async def test_generate_scene_prompts_keeps_temperature_for_non_gpt5(monkeypatch
 
     _, kwargs = mock_client.chat.completions.create.await_args
     assert kwargs["temperature"] == 0.7
+
+
+@pytest.mark.asyncio
+async def test_generate_scene_prompts_retries_after_empty_response():
+    empty_choice = MagicMock()
+    empty_choice.message.content = ""
+    empty_choice.message.refusal = None
+    empty_choice.finish_reason = None
+    empty_response = MagicMock()
+    empty_response.choices = [empty_choice]
+
+    scenes = [{"narration_text": "重試後旁白", "video_prompt": "A recovered scene"}]
+    valid_choice = MagicMock()
+    valid_choice.message.content = json.dumps({"scenes": scenes})
+    valid_choice.message.refusal = None
+    valid_choice.finish_reason = "stop"
+    valid_response = MagicMock()
+    valid_response.choices = [valid_choice]
+
+    with (
+        patch("app.services.prompt_generator.get_openai_client") as mock_get_client,
+        patch.object(prompt_generator_module.asyncio, "sleep", new=AsyncMock()) as mock_sleep,
+    ):
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=[empty_response, valid_response]
+        )
+        mock_get_client.return_value = mock_client
+
+        result = await generate_scene_prompts("Summary")
+
+    assert len(result) == 1
+    assert result[0]["narration_text"] == "重試後旁白"
+    assert mock_client.chat.completions.create.await_count == 2
+    mock_sleep.assert_awaited_once()

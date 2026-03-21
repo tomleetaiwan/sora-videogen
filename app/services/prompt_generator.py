@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 
@@ -16,6 +17,8 @@ logger = logging.getLogger(__name__)
 CHARS_PER_SECOND = 3
 SCENE_DURATION_LIMIT_SECONDS = get_max_scene_duration_seconds()
 MAX_NARRATION_CHARS = estimate_max_narration_chars(CHARS_PER_SECOND)
+MAX_SCENE_PROMPT_ATTEMPTS = 2
+SCENE_PROMPT_RETRY_DELAY_SECONDS = 3
 
 
 
@@ -45,7 +48,7 @@ For each scene, provide:
    at a natural Taiwanese Mandarin speaking pace.
 {_build_video_prompt_instruction(video_prompt_language)}
 
-Return a JSON array of objects with keys "narration_text" and "video_prompt".
+Return JSON in the shape {{"scenes": [{{"narration_text": "...", "video_prompt": "..."}}]}} only.
 Limit to at most {settings.max_scenes_per_project} scenes.
 Ensure scenes flow naturally and tell a cohesive story.
 """
@@ -137,6 +140,127 @@ def _parse_scene_response(
     )
 
 
+def _extract_text_from_content_part(part: object) -> str:
+    if isinstance(part, str):
+        return part
+
+    if isinstance(part, dict):
+        text_value = part.get("text")
+        if isinstance(text_value, str):
+            return text_value
+        if isinstance(text_value, dict):
+            nested_value = text_value.get("value")
+            if isinstance(nested_value, str):
+                return nested_value
+        return ""
+
+    text_value = getattr(part, "text", None)
+    if isinstance(text_value, str):
+        return text_value
+
+    nested_value = getattr(text_value, "value", None)
+    if isinstance(nested_value, str):
+        return nested_value
+
+    return ""
+
+
+def _extract_message_text(message: object) -> str:
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        text_fragments: list[str] = []
+        for part in content:
+            text_value = _extract_text_from_content_part(part).strip()
+            if text_value:
+                text_fragments.append(text_value)
+        return "\n".join(text_fragments).strip()
+
+    return ""
+
+
+def _extract_scene_result(
+    response: object,
+    *,
+    operation_label: str,
+) -> tuple[str | None, str, bool]:
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return None, f"No {operation_label} choices returned from model", True
+
+    choice = choices[0]
+    message = getattr(choice, "message", None)
+    raw = _extract_message_text(message)
+    if raw:
+        return raw, "", False
+
+    refusal = getattr(message, "refusal", None)
+    if isinstance(refusal, str) and refusal.strip():
+        return None, f"Model refused during {operation_label}: {refusal.strip()}", False
+
+    finish_reason = getattr(choice, "finish_reason", None)
+    if finish_reason == "content_filter":
+        return None, f"{operation_label.capitalize()} was blocked by the model content filter", False
+
+    if finish_reason == "length":
+        return None, f"{operation_label.capitalize()} stopped before returning usable JSON", False
+
+    return None, f"Empty {operation_label} returned from model", True
+
+
+async def _request_scene_payload(
+    *,
+    client,
+    request_kwargs: dict,
+    operation_label: str,
+    max_scenes: int,
+    strict_scene_count: bool = False,
+) -> list[dict]:
+    last_error_message = f"Empty {operation_label} returned from model"
+
+    for attempt_number in range(1, MAX_SCENE_PROMPT_ATTEMPTS + 1):
+        response = await client.chat.completions.create(**request_kwargs)
+        raw, error_message, retryable = _extract_scene_result(
+            response,
+            operation_label=operation_label,
+        )
+
+        if raw is not None:
+            try:
+                return _parse_scene_response(
+                    raw,
+                    max_scenes=max_scenes,
+                    strict_scene_count=strict_scene_count,
+                )
+            except json.JSONDecodeError as exc:
+                error_message = (
+                    f"{operation_label.capitalize()} returned invalid JSON: {exc.msg}"
+                )
+                retryable = True
+            except ValueError as exc:
+                error_message = f"{operation_label.capitalize()} returned unusable JSON: {exc}"
+                retryable = True
+
+        last_error_message = error_message
+        if retryable and attempt_number < MAX_SCENE_PROMPT_ATTEMPTS:
+            logger.warning(
+                "%s attempt %d/%d returned no usable content (%s). Retrying in %d seconds.",
+                operation_label.capitalize(),
+                attempt_number,
+                MAX_SCENE_PROMPT_ATTEMPTS,
+                error_message,
+                SCENE_PROMPT_RETRY_DELAY_SECONDS,
+            )
+            await asyncio.sleep(SCENE_PROMPT_RETRY_DELAY_SECONDS)
+            continue
+
+        raise ValueError(error_message)
+
+    raise ValueError(last_error_message)
+
+
 async def generate_scene_prompts(
     summary: str,
     *,
@@ -149,29 +273,28 @@ async def generate_scene_prompts(
     client = get_openai_client()
     resolved_video_prompt_language = normalize_video_prompt_language(video_prompt_language)
 
-    response = await client.chat.completions.create(
-        **prepare_chat_completion_kwargs(
-            settings.summarizer_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": _build_scene_generation_system_prompt(
-                        resolved_video_prompt_language
-                    ),
-                },
-                {"role": "user", "content": f"請根據以下摘要生成影片場景：\n\n{summary}"},
-            ],
-            temperature=0.7,
-            max_completion_tokens=4000,
-            response_format={"type": "json_object"},
-        )
+    request_kwargs = prepare_chat_completion_kwargs(
+        settings.summarizer_model,
+        messages=[
+            {
+                "role": "system",
+                "content": _build_scene_generation_system_prompt(
+                    resolved_video_prompt_language
+                ),
+            },
+            {"role": "user", "content": f"請根據以下摘要生成影片場景：\n\n{summary}"},
+        ],
+        temperature=0.7,
+        max_completion_tokens=4000,
+        response_format={"type": "json_object"},
     )
 
-    raw = response.choices[0].message.content
-    if not raw:
-        raise ValueError("Empty response from prompt generator")
-
-    validated = _parse_scene_response(raw, max_scenes=settings.max_scenes_per_project)
+    validated = await _request_scene_payload(
+        client=client,
+        request_kwargs=request_kwargs,
+        operation_label="scene prompt generation",
+        max_scenes=settings.max_scenes_per_project,
+    )
 
     logger.info("Generated %d scene prompts", len(validated))
     return validated
@@ -195,42 +318,38 @@ async def rewrite_or_split_scene(
         "English" if resolved_video_prompt_language == "en" else "Traditional Chinese"
     )
 
-    response = await client.chat.completions.create(
-        **prepare_chat_completion_kwargs(
-            settings.summarizer_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": _build_scene_rewrite_system_prompt(resolved_video_prompt_language),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "The current scene narration is too long. Rewrite it shorter if one scene can fit; "
-                        "otherwise split it into the fewest consecutive scenes needed.\n\n"
-                        f"Measured narration duration: {actual_duration_seconds:.2f} seconds\n"
-                        f"Hard limit per scene: {max_duration_seconds:.2f} seconds\n"
-                        f"Maximum scenes you may return: {max_scenes}\n\n"
-                        "Current narration (Traditional Chinese):\n"
-                        f"{narration_text}\n\n"
-                        f"Current video prompt ({current_video_prompt_language_label}):\n"
-                        f"{video_prompt}"
-                    ),
-                },
-            ],
-            temperature=0.4,
-            max_completion_tokens=2000,
-            response_format={"type": "json_object"},
-        )
+    request_kwargs = prepare_chat_completion_kwargs(
+        settings.summarizer_model,
+        messages=[
+            {
+                "role": "system",
+                "content": _build_scene_rewrite_system_prompt(resolved_video_prompt_language),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "The current scene narration is too long. Rewrite it shorter if one scene can fit; "
+                    "otherwise split it into the fewest consecutive scenes needed.\n\n"
+                    f"Measured narration duration: {actual_duration_seconds:.2f} seconds\n"
+                    f"Hard limit per scene: {max_duration_seconds:.2f} seconds\n"
+                    f"Maximum scenes you may return: {max_scenes}\n\n"
+                    "Current narration (Traditional Chinese):\n"
+                    f"{narration_text}\n\n"
+                    f"Current video prompt ({current_video_prompt_language_label}):\n"
+                    f"{video_prompt}"
+                ),
+            },
+        ],
+        temperature=0.4,
+        max_completion_tokens=2000,
+        response_format={"type": "json_object"},
     )
 
-    raw = response.choices[0].message.content
-    if not raw:
-        raise ValueError("Empty response from scene rewrite")
-
     # 重寫過長分鏡時，若超過 max_scenes 應視為錯誤，而不是直接裁切。
-    rewritten_scenes = _parse_scene_response(
-        raw,
+    rewritten_scenes = await _request_scene_payload(
+        client=client,
+        request_kwargs=request_kwargs,
+        operation_label="scene rewrite",
         max_scenes=max_scenes,
         strict_scene_count=True,
     )
