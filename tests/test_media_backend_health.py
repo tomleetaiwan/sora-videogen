@@ -70,3 +70,31 @@ def test_media_backend_subprocess_error_summary_uses_first_line():
     )
 
     assert _summarize_subprocess_error(error) == "first line"
+
+
+def test_media_backend_subprocess_error_summary_uses_stdout_when_stderr_empty():
+    from app.services.media_backend_health import _summarize_subprocess_error
+
+    error = subprocess.CalledProcessError(
+        1,
+        ["gst-inspect-1.0", "avenc_aac"],
+        stderr="",
+        output="stdout first line\nstdout second line",
+    )
+
+    assert _summarize_subprocess_error(error) == "stdout first line"
+
+
+def test_media_backend_subprocess_error_summary_handles_empty_output_and_stderr():
+    from app.services.media_backend_health import _summarize_subprocess_error
+
+    error = subprocess.CalledProcessError(
+        1,
+        ["gst-inspect-1.0", "avenc_aac"],
+        stderr="",
+        output="",
+    )
+
+    # When both stderr and stdout are empty, fall back to the string
+    # representation of the error to ensure a non-empty summary.
+    assert _summarize_subprocess_error(error) == str(error)

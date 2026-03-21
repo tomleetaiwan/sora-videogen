@@ -361,4 +361,8 @@ def _run_command(command: list[str], *, tool_name: str) -> None:
         stderr = (exc.stderr or "").strip()
         stdout = (exc.stdout or "").strip()
         detail = stderr or stdout or "unknown error"
-        raise RuntimeError(f"{tool_name} failed: {detail}") from exc
+        cmd_name = command[0] if command else tool_name
+        cmd_str = " ".join(command) if command else cmd_name
+        raise RuntimeError(
+            f"{tool_name} failed while running '{cmd_name}': {detail}. Command: {cmd_str}"
+        ) from exc

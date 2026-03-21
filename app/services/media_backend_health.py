@@ -130,4 +130,8 @@ def _summarize_subprocess_error(error: subprocess.CalledProcessError) -> str:
     stderr = (error.stderr or "").strip()
     stdout = (error.stdout or "").strip()
     summary = stderr or stdout or error.__class__.__name__
-    return summary.splitlines()[0]
+    lines = summary.splitlines()
+    if lines:
+        return lines[0]
+    # Fallback: in the unlikely event summary is empty, use the class name.
+    return error.__class__.__name__
