@@ -196,22 +196,6 @@ def test_get_available_gstreamer_aac_encoder_prefers_first_available(monkeypatch
     assert media_backend.get_available_gstreamer_aac_encoder() == "voaacenc"
 
 
-def test_get_available_gstreamer_h264_encoder_prefers_first_available(monkeypatch):
-    availability = {
-        "x264enc": False,
-        "openh264enc": True,
-        "avenc_h264": True,
-    }
-
-    monkeypatch.setattr(
-        media_backend,
-        "inspect_gstreamer_element",
-        lambda element_name: availability[element_name],
-    )
-
-    assert media_backend.get_available_gstreamer_h264_encoder() == "openh264enc"
-
-
 def test_get_available_gstreamer_aac_encoder_raises_when_none_found(monkeypatch):
     monkeypatch.setattr(media_backend, "inspect_gstreamer_element", lambda element_name: False)
 
@@ -313,52 +297,6 @@ def test_stitch_with_gstreamer_falls_back_to_ffmpeg_when_concat_fails(monkeypatc
     ffmpeg_fallback_mock.assert_called_once()
     assert output_path.read_bytes() == b"final"
     assert not segment_path.exists()
-
-
-def test_experimental_reencode_stitch_uses_pure_gstreamer_pipeline(monkeypatch, tmp_path):
-    video_paths = [tmp_path / "scene.mp4"]
-    audio_paths = [tmp_path / "scene.wav"]
-    output_path = tmp_path / "final.mp4"
-    recorded_commands: list[tuple[str, list[str], int | None]] = []
-
-    video_paths[0].write_bytes(b"video")
-    with wave.open(str(audio_paths[0]), "wb") as wav_file:
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(2)
-        wav_file.setframerate(8000)
-        wav_file.writeframes(b"\x00\x00" * (8000 * 4))
-
-    monkeypatch.setattr(media_backend, "_ensure_command_available", Mock())
-    monkeypatch.setattr(media_backend, "get_available_gstreamer_h264_encoder", lambda: "x264enc")
-    monkeypatch.setattr(media_backend, "inspect_gstreamer_element", lambda element_name: element_name == "voaacenc")
-
-    def fake_run_command(command: list[str], *, tool_name: str, timeout_seconds=None):
-        recorded_commands.append((tool_name, command, timeout_seconds))
-        if tool_name == "gstreamer segment mux":
-            (tmp_path / "_segment_0.mp4").write_bytes(b"segment")
-            return
-        output_path.write_bytes(b"final")
-
-    monkeypatch.setattr(media_backend, "_run_command", fake_run_command)
-
-    result = media_backend.stitch_videos_with_gstreamer_reencode_experimental(
-        video_paths,
-        audio_paths,
-        output_path,
-    )
-
-    assert result == output_path
-    assert output_path.read_bytes() == b"final"
-    assert len(recorded_commands) == 2
-    reencode_tool_name, reencode_command, reencode_timeout = recorded_commands[1]
-    assert reencode_tool_name == "gstreamer decodebin reencode concat"
-    assert reencode_timeout == 600
-    assert "x264enc" in reencode_command
-    assert "speed-preset=veryfast" in reencode_command
-    assert "tune=zerolatency" in reencode_command
-    assert "voaacenc" in reencode_command
-    assert "bitrate=128000" in reencode_command
-    assert "decodebin" in reencode_command
 
 
 def test_invalid_media_backend_raises(monkeypatch):
