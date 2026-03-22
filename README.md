@@ -206,6 +206,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8765
 - 預設旁白音色為 `zh-TW-HsiaoYuNeural`，以符合本專案正體中文與台灣用語的需求。
 - 音訊以 `.wav` 檔寫出，因為這是 Azure Speech SDK 範例最直接的輸出方式，也能和現有媒體串接流程自然整合。
 - 生成流程會量測合成後 WAV 的實際時長，只有在音訊能落在 Sora 有效時長限制內時，才會送交 Sora 2 產生影片。若旁白過長，系統會在生成影片前自動重寫或拆分成額外分鏡。
+- 進入最終串接前，系統會依每個分鏡實際採用的影片長度（`4`、`8`、`12` 秒）對旁白 WAV 做共用對齊處理，必要時自動補靜音或裁切，讓 ffmpeg 與 GStreamer 兩個後端吃到一致的音訊長度。
 - 使用金鑰驗證時，請設定 `AZURE_SPEECH_KEY`，以及 `AZURE_SPEECH_REGION` 或 `AZURE_SPEECH_ENDPOINT`。
 - 使用 Microsoft Entra ID 驗證時，請設定 `AZURE_SPEECH_USE_ENTRA_ID=true`，並同時提供 `AZURE_SPEECH_REGION` 與 `AZURE_SPEECH_RESOURCE_ID`。
 
@@ -216,7 +217,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8765
 3. 把摘要拆成分鏡級別的旁白與影片提示詞。
 4. 在 Web UI 檢查並編輯提示詞。
 5. 為每個分鏡生成 TTS 音訊與 Sora 2 影片。
-6. 依需求重生分鏡後，再用目前設定的媒體後端串接所有分段為最終影片。
+6. 依需求重生分鏡後，系統會先把每個分鏡的旁白對齊到目標影片長度，再用目前設定的媒體後端串接所有分段為最終影片。
 
 ### 媒體後端切換
 
@@ -234,6 +235,13 @@ GSTREAMER_FRAME_SAMPLE_FPS=2
 - 將各分鏡影片與旁白重新封裝後串接成最終影片
 - 以取樣影格方式擷取前一段影片的最後可用畫面，供下一段 Sora 生成作為參考
 
+不論實際使用 ffmpeg 或 GStreamer，最終串接前都會先套用同一套 scene 級音訊對齊邏輯：
+
+- 以每個分鏡實際採用的影片時長作為目標長度，而不是只沿用原始 TTS WAV 長度
+- 若旁白較短，會先補靜音到對應影片秒數
+- 若旁白較長，會先裁切到對應影片秒數
+- 這一層會在媒體後端切換之前先完成，目的是消除 ffmpeg 與 GStreamer 因輸入音訊長度不同而造成的明顯 A/V lag
+
 當設定為 GStreamer 時，應用程式會在啟動時自動檢查：
 
 - `GSTREAMER_LAUNCH_BINARY` 指定的指令是否存在
@@ -244,6 +252,8 @@ GSTREAMER_FRAME_SAMPLE_FPS=2
 若有任一項缺失，首頁會顯示 `GStreamer 媒體後端尚未就緒` 的警示，並列出缺少的指令或插件名稱，讓你在開始生成影片前就能先修正環境。
 
 若 `avenc_aac` 不存在，但其他支援的 AAC encoder 可用，系統會自動回退到可用的 encoder，而不會因為單一插件缺失而直接卡住。這個設計特別適合不同作業系統上 GStreamer plugin 組合不完全一致的情況，例如 macOS。
+
+此外，GStreamer 路徑會針對 AAC encoder 的 priming / padding 差異做補償，避免每段音訊在重新封裝後累積固定尾差。例如在 24kHz 單聲道條件下，`avenc_aac` 會多出約 `1024` samples，而 `voaacenc` 的行為又不同；系統會在共用音訊對齊階段先依實際 encoder 調整對應 frame 數，將這種 segment 級累積誤差壓回到接近 ffmpeg 的量級。
 
 若未特別設定，系統仍會維持既有 ffmpeg 行為。
 

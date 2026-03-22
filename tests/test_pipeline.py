@@ -402,9 +402,10 @@ async def test_run_stitching_uses_latest_scene_media(db_engine, monkeypatch, tmp
 
     stitched_inputs = {}
 
-    def fake_stitch_videos(video_paths, audio_paths, output_path):
+    def fake_stitch_videos(video_paths, audio_paths, output_path, *, scene_durations_seconds=None):
         stitched_inputs["video_paths"] = [path.name for path in video_paths]
         stitched_inputs["audio_paths"] = [path.name for path in audio_paths]
+        stitched_inputs["scene_durations_seconds"] = scene_durations_seconds
         output_path.write_bytes(b"final-video")
         return output_path
 
@@ -421,5 +422,6 @@ async def test_run_stitching_uses_latest_scene_media(db_engine, monkeypatch, tmp
     assert stitched_inputs == {
         "video_paths": ["video.mp4", "video.mp4"],
         "audio_paths": ["narration.wav", "narration.wav"],
+        "scene_durations_seconds": [8, 8],
     }
     assert (tmp_path / str(project_id) / "final_video.mp4").exists()

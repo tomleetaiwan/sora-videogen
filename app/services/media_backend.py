@@ -2,12 +2,14 @@ import logging
 import math
 import shutil
 import subprocess
+import wave
 from fractions import Fraction
 from pathlib import Path
 
 import ffmpeg
 
 from app.config import settings
+from app.video_timing import resolve_video_duration_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,23 @@ GSTREAMER_AAC_ENCODER_CANDIDATES = (
     "voaacenc",
     "faac",
 )
+GSTREAMER_AAC_ENCODER_FRAME_OFFSETS = {
+    "avenc_aac": -1024,
+    "voaacenc": 512,
+}
+GSTREAMER_H264_ENCODER_CANDIDATES = (
+    "x264enc",
+    "openh264enc",
+    "avenc_h264",
+)
+GSTREAMER_H264_DECODER_CANDIDATES = (
+    "avdec_h264",
+    "openh264dec",
+)
+GSTREAMER_AAC_DECODER_CANDIDATES = (
+    "avdec_aac",
+    "faad",
+)
 
 
 def get_media_backend() -> str:
@@ -57,15 +76,50 @@ def _format_gstreamer_path(path: Path) -> str:
     return path.resolve().as_posix()
 
 
-def get_available_gstreamer_aac_encoder() -> str:
-    for encoder_name in GSTREAMER_AAC_ENCODER_CANDIDATES:
-        if inspect_gstreamer_element(encoder_name):
-            return encoder_name
+def _get_first_available_gstreamer_element(
+    candidates: tuple[str, ...],
+    *,
+    element_kind: str,
+) -> str:
+    for element_name in candidates:
+        if inspect_gstreamer_element(element_name):
+            return element_name
 
-    candidate_list = ", ".join(GSTREAMER_AAC_ENCODER_CANDIDATES)
+    candidate_list = ", ".join(candidates)
     raise RuntimeError(
-        "No supported GStreamer AAC encoder is available. "
-        f"Tried: {candidate_list}"
+        f"No supported GStreamer {element_kind} is available. Tried: {candidate_list}"
+    )
+
+
+def get_available_gstreamer_aac_encoder() -> str:
+    return _get_first_available_gstreamer_element(
+        GSTREAMER_AAC_ENCODER_CANDIDATES,
+        element_kind="AAC encoder",
+    )
+
+
+def get_gstreamer_aac_encoder_frame_offset(encoder_name: str) -> int:
+    return GSTREAMER_AAC_ENCODER_FRAME_OFFSETS.get(encoder_name, 0)
+
+
+def get_available_gstreamer_h264_encoder() -> str:
+    return _get_first_available_gstreamer_element(
+        GSTREAMER_H264_ENCODER_CANDIDATES,
+        element_kind="H.264 encoder",
+    )
+
+
+def get_available_gstreamer_h264_decoder() -> str:
+    return _get_first_available_gstreamer_element(
+        GSTREAMER_H264_DECODER_CANDIDATES,
+        element_kind="H.264 decoder",
+    )
+
+
+def get_available_gstreamer_aac_decoder() -> str:
+    return _get_first_available_gstreamer_element(
+        GSTREAMER_AAC_DECODER_CANDIDATES,
+        element_kind="AAC decoder",
     )
 
 
@@ -91,6 +145,8 @@ def stitch_videos(
     video_paths: list[Path],
     audio_paths: list[Path],
     output_path: Path,
+    *,
+    scene_durations_seconds: list[float | None] | None = None,
 ) -> Path:
     """將影片與對應音軌串接成單一影片。
 
@@ -105,9 +161,70 @@ def stitch_videos(
     回傳最終影片的路徑。
     """
     backend = get_media_backend()
-    if backend == "gstreamer":
-        return _stitch_with_gstreamer(video_paths, audio_paths, output_path)
-    return _stitch_with_ffmpeg(video_paths, audio_paths, output_path)
+    gstreamer_aac_encoder = get_available_gstreamer_aac_encoder() if backend == "gstreamer" else None
+    aligned_audio_paths, temp_audio_paths = _prepare_aligned_audio_paths(
+        audio_paths,
+        output_dir=output_path.parent,
+        scene_durations_seconds=scene_durations_seconds,
+        frame_count_offset=(
+            get_gstreamer_aac_encoder_frame_offset(gstreamer_aac_encoder)
+            if gstreamer_aac_encoder is not None
+            else 0
+        ),
+    )
+
+    try:
+        if backend == "gstreamer":
+            return _stitch_with_gstreamer(
+                video_paths,
+                aligned_audio_paths,
+                output_path,
+                aac_encoder=gstreamer_aac_encoder,
+            )
+        return _stitch_with_ffmpeg(video_paths, aligned_audio_paths, output_path)
+    finally:
+        _cleanup_paths(temp_audio_paths)
+
+
+def stitch_videos_with_gstreamer_reencode_experimental(
+    video_paths: list[Path],
+    audio_paths: list[Path],
+    output_path: Path,
+    *,
+    scene_durations_seconds: list[float | None] | None = None,
+) -> Path:
+    """Experimental pure-GStreamer stitching via decode, raw concat, and re-encode."""
+    _validate_stitch_inputs(video_paths, audio_paths, output_path)
+    _ensure_command_available(settings.gstreamer_launch_binary)
+
+    aac_encoder = get_available_gstreamer_aac_encoder()
+    aligned_audio_paths, temp_audio_paths = _prepare_aligned_audio_paths(
+        audio_paths,
+        output_dir=output_path.parent,
+        scene_durations_seconds=scene_durations_seconds,
+        frame_count_offset=get_gstreamer_aac_encoder_frame_offset(aac_encoder),
+    )
+    segments: list[Path] = []
+
+    try:
+        segments = _create_gstreamer_muxed_segments(
+            video_paths,
+            aligned_audio_paths,
+            output_path.parent,
+            aac_encoder=aac_encoder,
+        )
+        output_path.unlink(missing_ok=True)
+        _concat_segments_with_gstreamer_decodebin_reencode(segments, output_path)
+    finally:
+        _cleanup_paths(temp_audio_paths)
+        _cleanup_paths(segments)
+
+    logger.info(
+        "Stitched %d input pairs into %s via experimental gstreamer re-encode",
+        len(video_paths),
+        output_path,
+    )
+    return output_path
 
 
 def extract_last_frame(
@@ -145,6 +262,100 @@ def _validate_stitch_inputs(
         raise ValueError("No videos to stitch")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _prepare_aligned_audio_paths(
+    audio_paths: list[Path],
+    *,
+    output_dir: Path,
+    scene_durations_seconds: list[float | None] | None,
+    frame_count_offset: int = 0,
+) -> tuple[list[Path], list[Path]]:
+    if scene_durations_seconds is not None and len(scene_durations_seconds) != len(audio_paths):
+        raise ValueError(
+            "Mismatched counts: "
+            f"{len(audio_paths)} audio files, {len(scene_durations_seconds)} scene durations"
+        )
+
+    aligned_audio_paths: list[Path] = []
+    temp_audio_paths: list[Path] = []
+
+    for index, audio_path in enumerate(audio_paths):
+        audio_duration_seconds = _get_wav_duration_seconds(audio_path)
+        target_duration_seconds = _resolve_target_scene_duration_seconds(
+            audio_duration_seconds,
+            scene_durations_seconds[index] if scene_durations_seconds is not None else None,
+        )
+
+        if target_duration_seconds is None or math.isclose(
+            audio_duration_seconds,
+            target_duration_seconds,
+            abs_tol=0.01,
+        ):
+            aligned_audio_paths.append(audio_path)
+            continue
+
+        aligned_audio_path = output_dir / f"_aligned_audio_{index}.wav"
+        _write_aligned_wav(
+            source_path=audio_path,
+            output_path=aligned_audio_path,
+            target_duration_seconds=target_duration_seconds,
+            frame_count_offset=frame_count_offset,
+        )
+        aligned_audio_paths.append(aligned_audio_path)
+        temp_audio_paths.append(aligned_audio_path)
+
+    return aligned_audio_paths, temp_audio_paths
+
+
+def _resolve_target_scene_duration_seconds(
+    audio_duration_seconds: float,
+    scene_duration_seconds: float | None,
+) -> float | None:
+    if scene_duration_seconds is not None:
+        return scene_duration_seconds
+
+    return resolve_video_duration_seconds(audio_duration_seconds)
+
+
+def _get_wav_duration_seconds(audio_path: Path) -> float:
+    with wave.open(str(audio_path), "rb") as wav_file:
+        frame_count = wav_file.getnframes()
+        frame_rate = wav_file.getframerate()
+
+    if frame_rate <= 0:
+        raise ValueError(f"Invalid WAV frame rate for audio file: {audio_path}")
+
+    return frame_count / float(frame_rate)
+
+
+def _write_aligned_wav(
+    *,
+    source_path: Path,
+    output_path: Path,
+    target_duration_seconds: float,
+    frame_count_offset: int = 0,
+) -> None:
+    with wave.open(str(source_path), "rb") as source_wav:
+        params = source_wav.getparams()
+        audio_frames = source_wav.readframes(source_wav.getnframes())
+
+    frame_rate = params.framerate
+    if frame_rate <= 0:
+        raise ValueError(f"Invalid WAV frame rate for audio file: {source_path}")
+
+    target_frame_count = max(0, round(target_duration_seconds * frame_rate) + frame_count_offset)
+    frame_width = params.sampwidth * params.nchannels
+    target_byte_count = target_frame_count * frame_width
+
+    if len(audio_frames) < target_byte_count:
+        audio_frames += b"\x00" * (target_byte_count - len(audio_frames))
+    else:
+        audio_frames = audio_frames[:target_byte_count]
+
+    with wave.open(str(output_path), "wb") as output_wav:
+        output_wav.setparams(params)
+        output_wav.writeframes(audio_frames)
 
 
 def _stitch_with_ffmpeg(
@@ -193,142 +404,375 @@ def _stitch_with_gstreamer(
     video_paths: list[Path],
     audio_paths: list[Path],
     output_path: Path,
+    *,
+    aac_encoder: str | None = None,
 ) -> Path:
     _validate_stitch_inputs(video_paths, audio_paths, output_path)
     _ensure_command_available(settings.gstreamer_launch_binary)
-    aac_encoder = get_available_gstreamer_aac_encoder()
-
     segments: list[Path] = []
     try:
-        for i, (video_path, audio_path) in enumerate(zip(video_paths, audio_paths)):
-            segment_path = output_path.parent / f"_segment_{i}.mp4"
-            _run_command(
-                [
-                    settings.gstreamer_launch_binary,
-                    "-q",
-                    "-e",
-                    "filesrc",
-                    f"location={_format_gstreamer_path(video_path)}",
-                    "!",
-                    "qtdemux",
-                    "name=demux",
-                    "demux.video_0",
-                    "!",
-                    "queue",
-                    "!",
-                    "h264parse",
-                    "!",
-                    "mux.",
-                    "filesrc",
-                    f"location={_format_gstreamer_path(audio_path)}",
-                    "!",
-                    "wavparse",
-                    "!",
-                    "audioconvert",
-                    "!",
-                    "audioresample",
-                    "!",
-                    aac_encoder,
-                    "!",
-                    "aacparse",
-                    "!",
-                    "mux.",
-                    "mp4mux",
-                    "name=mux",
-                    "faststart=true",
-                    "!",
-                    "filesink",
-                    f"location={_format_gstreamer_path(segment_path)}",
-                ],
-                tool_name="gstreamer segment mux",
+        segments = _create_gstreamer_muxed_segments(
+            video_paths,
+            audio_paths,
+            output_path.parent,
+            aac_encoder=aac_encoder,
+        )
+        try:
+            _concat_segments_with_gstreamer(segments, output_path)
+        except RuntimeError:
+            if resolve_command_path("ffmpeg") is None:
+                raise
+
+            logger.warning(
+                "GStreamer concat failed for %s. Falling back to ffmpeg concat.",
+                output_path,
+                exc_info=True,
             )
-            segments.append(segment_path)
-
-        concat_command = [
-            settings.gstreamer_launch_binary,
-            "-q",
-            "-e",
-            "concat",
-            "name=vcat",
-            "!",
-            "queue",
-            "!",
-            "h264parse",
-            "!",
-            "mux.",
-            "concat",
-            "name=acat",
-            "!",
-            "queue",
-            "!",
-            "aacparse",
-            "!",
-            "mux.",
-            "mp4mux",
-            "name=mux",
-            "faststart=true",
-            "!",
-            "filesink",
-            f"location={_format_gstreamer_path(output_path)}",
-        ]
-
-        for index, segment_path in enumerate(segments):
-            demux_name = f"demux{index}"
-            concat_command.extend(
-                [
-                    "filesrc",
-                    f"location={_format_gstreamer_path(segment_path)}",
-                    "!",
-                    "qtdemux",
-                    f"name={demux_name}",
-                    f"{demux_name}.video_0",
-                    "!",
-                    "queue",
-                    "!",
-                    "h264parse",
-                    "!",
-                    "vcat.",
-                    f"{demux_name}.audio_0",
-                    "!",
-                    "queue",
-                    "!",
-                    "aacparse",
-                    "!",
-                    "acat.",
-                ]
-            )
-
-        _run_command(concat_command, tool_name="gstreamer concat")
+            output_path.unlink(missing_ok=True)
+            _concat_segments_with_ffmpeg(segments, output_path)
+            logger.info("Stitched %d segments into %s via ffmpeg fallback", len(segments), output_path)
+            return output_path
     finally:
-        for segment_path in segments:
-            segment_path.unlink(missing_ok=True)
+        _cleanup_paths(segments)
 
     logger.info("Stitched %d segments into %s via gstreamer", len(segments), output_path)
     return output_path
 
 
-def _extract_last_frame_with_ffmpeg(
-    video_path: Path,
-    output_path: Path,
+def _create_gstreamer_muxed_segments(
+    video_paths: list[Path],
+    audio_paths: list[Path],
+    output_dir: Path,
     *,
-    effective_duration_seconds: float | None = None,
-) -> Path:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    aac_encoder: str | None = None,
+) -> list[Path]:
+    aac_encoder = aac_encoder or get_available_gstreamer_aac_encoder()
+    segments: list[Path] = []
 
-    probe = ffmpeg.probe(str(video_path))
-    duration = float(probe["format"]["duration"])
-    if effective_duration_seconds is not None:
-        duration = min(duration, effective_duration_seconds)
+    for i, (video_path, audio_path) in enumerate(zip(video_paths, audio_paths)):
+        segment_path = output_dir / f"_segment_{i}.mp4"
+        _run_command(
+            [
+                settings.gstreamer_launch_binary,
+                "-q",
+                "-e",
+                "filesrc",
+                f"location={_format_gstreamer_path(video_path)}",
+                "!",
+                "qtdemux",
+                "name=demux",
+                "demux.video_0",
+                "!",
+                "queue",
+                "!",
+                "h264parse",
+                "!",
+                "mux.",
+                "filesrc",
+                f"location={_format_gstreamer_path(audio_path)}",
+                "!",
+                "wavparse",
+                "!",
+                "audioconvert",
+                "!",
+                "audioresample",
+                "!",
+                aac_encoder,
+                "!",
+                "aacparse",
+                "!",
+                "mux.",
+                "mp4mux",
+                "name=mux",
+                "faststart=true",
+                "!",
+                "filesink",
+                f"location={_format_gstreamer_path(segment_path)}",
+            ],
+            tool_name="gstreamer segment mux",
+        )
+        segments.append(segment_path)
 
-    (
-        ffmpeg.input(str(video_path), ss=max(0, duration - 0.1))
-        .output(str(output_path), vframes=1, format="image2")
-        .overwrite_output()
-        .run(quiet=True)
+    return segments
+
+
+def _concat_segments_with_gstreamer(segments: list[Path], output_path: Path) -> None:
+    concat_command = [
+        settings.gstreamer_launch_binary,
+        "-q",
+        "-e",
+        "concat",
+        "name=vcat",
+        "!",
+        "queue",
+        "!",
+        "h264parse",
+        "!",
+        "mux.",
+        "concat",
+        "name=acat",
+        "!",
+        "queue",
+        "!",
+        "aacparse",
+        "!",
+        "mux.",
+        "mp4mux",
+        "name=mux",
+        "faststart=true",
+        "!",
+        "filesink",
+        f"location={_format_gstreamer_path(output_path)}",
+    ]
+
+    for index, segment_path in enumerate(segments):
+        demux_name = f"demux{index}"
+        concat_command.extend(
+            [
+                "filesrc",
+                f"location={_format_gstreamer_path(segment_path)}",
+                "!",
+                "qtdemux",
+                f"name={demux_name}",
+                f"{demux_name}.video_0",
+                "!",
+                "queue",
+                "!",
+                "h264parse",
+                "!",
+                "vcat.",
+                f"{demux_name}.audio_0",
+                "!",
+                "queue",
+                "!",
+                "aacparse",
+                "!",
+                "acat.",
+            ]
+        )
+
+    _run_command(concat_command, tool_name="gstreamer concat", timeout_seconds=30)
+
+
+def _concat_inputs_with_gstreamer_reencode(
+    video_paths: list[Path],
+    audio_paths: list[Path],
+    output_path: Path,
+) -> None:
+    video_encoder = get_available_gstreamer_h264_encoder()
+    video_decoder = get_available_gstreamer_h264_decoder()
+    audio_encoder = get_available_gstreamer_aac_encoder()
+
+    concat_command = [
+        settings.gstreamer_launch_binary,
+        "-e",
+        "concat",
+        "name=vcat",
+        "!",
+        "queue",
+        "!",
+        "videoconvert",
+        "!",
+        "video/x-raw,format=I420,width=1280,height=720,framerate=30/1",
+        "!",
+        video_encoder,
+        "!",
+        "h264parse",
+        "!",
+        "mux.",
+        "concat",
+        "name=acat",
+        "!",
+        "queue",
+        "!",
+        "audioconvert",
+        "!",
+        "audioresample",
+        "!",
+        "audio/x-raw,rate=24000,channels=1",
+        "!",
+        audio_encoder,
+        "!",
+        "aacparse",
+        "!",
+        "mux.",
+        "mp4mux",
+        "name=mux",
+        "faststart=true",
+        "!",
+        "filesink",
+        f"location={_format_gstreamer_path(output_path)}",
+    ]
+
+    for index, (video_path, audio_path) in enumerate(zip(video_paths, audio_paths)):
+        demux_name = f"video_demux{index}"
+        concat_command.extend(
+            [
+                "filesrc",
+                f"location={_format_gstreamer_path(video_path)}",
+                "!",
+                "qtdemux",
+                f"name={demux_name}",
+                f"{demux_name}.video_0",
+                "!",
+                "queue",
+                "!",
+                "h264parse",
+                "!",
+                video_decoder,
+                "!",
+                "videoconvert",
+                "!",
+                "videoscale",
+                "!",
+                "videorate",
+                "!",
+                "video/x-raw,format=I420,width=1280,height=720,framerate=30/1",
+                "!",
+                "vcat.",
+                "filesrc",
+                f"location={_format_gstreamer_path(audio_path)}",
+                "!",
+                "wavparse",
+                "!",
+                "audioconvert",
+                "!",
+                "audioresample",
+                "!",
+                "audio/x-raw,rate=24000,channels=1",
+                "!",
+                "acat.",
+            ]
+        )
+
+    _run_command(
+        concat_command,
+        tool_name="gstreamer reencode concat",
+        timeout_seconds=600,
     )
 
-    logger.info("Extracted last frame via ffmpeg: %s", output_path)
-    return output_path
+
+def _concat_segments_with_gstreamer_decodebin_reencode(
+    segments: list[Path],
+    output_path: Path,
+) -> None:
+    video_encoder = get_available_gstreamer_h264_encoder()
+    audio_encoder = "voaacenc" if inspect_gstreamer_element("voaacenc") else get_available_gstreamer_aac_encoder()
+
+    video_encode_chain = [video_encoder]
+    if video_encoder == "x264enc":
+        video_encode_chain = [
+            "x264enc",
+            "bitrate=2048",
+            "speed-preset=veryfast",
+            "tune=zerolatency",
+        ]
+
+    audio_encode_chain = [audio_encoder]
+    audio_caps = "audio/x-raw,rate=24000,channels=1"
+    if audio_encoder == "voaacenc":
+        audio_encode_chain = ["voaacenc", "bitrate=128000"]
+        audio_caps = "audio/x-raw,format=S16LE,rate=24000,channels=1"
+
+    concat_command = [
+        settings.gstreamer_launch_binary,
+        "-e",
+        "concat",
+        "name=vcat",
+        "!",
+        "queue",
+        "!",
+        "videoconvert",
+        "!",
+        "videoscale",
+        "!",
+        "video/x-raw,format=I420,width=1280,height=720,framerate=30/1",
+        "!",
+        *video_encode_chain,
+        "!",
+        "h264parse",
+        "!",
+        "queue",
+        "!",
+        "mux.",
+        "concat",
+        "name=acat",
+        "!",
+        "queue",
+        "!",
+        "audioconvert",
+        "!",
+        "audioresample",
+        "!",
+        audio_caps,
+        "!",
+        *audio_encode_chain,
+        "!",
+        "aacparse",
+        "!",
+        "queue",
+        "!",
+        "mux.",
+        "mp4mux",
+        "name=mux",
+        "faststart=true",
+        "!",
+        "filesink",
+        f"location={_format_gstreamer_path(output_path)}",
+    ]
+
+    for index, segment_path in enumerate(segments):
+        decodebin_name = f"d{index}"
+        concat_command.extend(
+            [
+                "filesrc",
+                f"location={_format_gstreamer_path(segment_path)}",
+                "!",
+                "decodebin",
+                f"name={decodebin_name}",
+                f"{decodebin_name}.",
+                "!",
+                "queue",
+                "!",
+                "vcat.",
+                f"{decodebin_name}.",
+                "!",
+                "queue",
+                "!",
+                "acat.",
+            ]
+        )
+
+    _run_command(
+        concat_command,
+        tool_name="gstreamer decodebin reencode concat",
+        timeout_seconds=600,
+    )
+
+
+def _concat_segments_with_ffmpeg(segments: list[Path], output_path: Path) -> None:
+    concat_list_path = output_path.parent / "_gstreamer_fallback_concat_list.txt"
+    with open(concat_list_path, "w", encoding="utf-8") as file:
+        for segment_path in segments:
+            file.write(f"file '{segment_path.resolve()}'\n")
+
+    try:
+        (
+            ffmpeg.input(str(concat_list_path), format="concat", safe=0)
+            .output(str(output_path), c="copy")
+            .overwrite_output()
+            .run(quiet=True)
+        )
+    finally:
+        concat_list_path.unlink(missing_ok=True)
+
+
+def _cleanup_paths(paths: list[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except PermissionError:
+            logger.warning("Could not remove temporary file because it is still locked: %s", path)
 
 
 def _extract_last_frame_with_gstreamer(
@@ -398,7 +842,7 @@ def _ensure_command_available(command_name: str) -> None:
     raise RuntimeError(f"Required command not found in PATH: {command_name}")
 
 
-def _run_command(command: list[str], *, tool_name: str) -> None:
+def _run_command(command: list[str], *, tool_name: str, timeout_seconds: int | None = None) -> None:
     resolved_executable = resolve_command_path(command[0]) if command else None
     if resolved_executable is None:
         raise RuntimeError(f"Required command not found in PATH: {command[0]}")
@@ -409,7 +853,14 @@ def _run_command(command: list[str], *, tool_name: str) -> None:
             check=True,
             capture_output=True,
             text=True,
+            timeout=timeout_seconds,
         )
+    except subprocess.TimeoutExpired as exc:
+        cmd_name = command[0] if command else tool_name
+        cmd_str = " ".join(command) if command else cmd_name
+        raise RuntimeError(
+            f"{tool_name} timed out while running '{cmd_name}'. Command: {cmd_str}"
+        ) from exc
     except subprocess.CalledProcessError as exc:
         stderr = (exc.stderr or "").strip()
         stdout = (exc.stdout or "").strip()
