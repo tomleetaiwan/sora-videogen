@@ -20,7 +20,6 @@ GSTREAMER_REQUIRED_ELEMENTS = (
     "wavparse",
     "audioconvert",
     "audioresample",
-    "avenc_aac",
     "aacparse",
     "mp4mux",
     "concat",
@@ -32,6 +31,12 @@ GSTREAMER_REQUIRED_ELEMENTS = (
     "multifilesink",
     "identity",
 )
+GSTREAMER_AAC_ENCODER_CANDIDATES = (
+    "avenc_aac",
+    "fdkaacenc",
+    "voaacenc",
+    "faac",
+)
 
 
 def get_media_backend() -> str:
@@ -42,6 +47,44 @@ def get_media_backend() -> str:
             f"{settings.media_backend}. Supported backends: ffmpeg, gstreamer"
         )
     return backend
+
+
+def resolve_command_path(command_name: str) -> str | None:
+    return shutil.which(command_name)
+
+
+def _format_gstreamer_path(path: Path) -> str:
+    return path.resolve().as_posix()
+
+
+def get_available_gstreamer_aac_encoder() -> str:
+    for encoder_name in GSTREAMER_AAC_ENCODER_CANDIDATES:
+        if inspect_gstreamer_element(encoder_name):
+            return encoder_name
+
+    candidate_list = ", ".join(GSTREAMER_AAC_ENCODER_CANDIDATES)
+    raise RuntimeError(
+        "No supported GStreamer AAC encoder is available. "
+        f"Tried: {candidate_list}"
+    )
+
+
+def inspect_gstreamer_element(element_name: str) -> bool:
+    resolved_command = resolve_command_path(settings.gstreamer_inspect_binary)
+    if resolved_command is None:
+        return False
+
+    try:
+        subprocess.run(
+            [resolved_command, element_name],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+    return True
 
 
 def stitch_videos(
@@ -153,6 +196,7 @@ def _stitch_with_gstreamer(
 ) -> Path:
     _validate_stitch_inputs(video_paths, audio_paths, output_path)
     _ensure_command_available(settings.gstreamer_launch_binary)
+    aac_encoder = get_available_gstreamer_aac_encoder()
 
     segments: list[Path] = []
     try:
@@ -164,7 +208,7 @@ def _stitch_with_gstreamer(
                     "-q",
                     "-e",
                     "filesrc",
-                    f"location={video_path.resolve()}",
+                    f"location={_format_gstreamer_path(video_path)}",
                     "!",
                     "qtdemux",
                     "name=demux",
@@ -176,7 +220,7 @@ def _stitch_with_gstreamer(
                     "!",
                     "mux.",
                     "filesrc",
-                    f"location={audio_path.resolve()}",
+                    f"location={_format_gstreamer_path(audio_path)}",
                     "!",
                     "wavparse",
                     "!",
@@ -184,7 +228,7 @@ def _stitch_with_gstreamer(
                     "!",
                     "audioresample",
                     "!",
-                    "avenc_aac",
+                    aac_encoder,
                     "!",
                     "aacparse",
                     "!",
@@ -194,7 +238,7 @@ def _stitch_with_gstreamer(
                     "faststart=true",
                     "!",
                     "filesink",
-                    f"location={segment_path}",
+                    f"location={_format_gstreamer_path(segment_path)}",
                 ],
                 tool_name="gstreamer segment mux",
             )
@@ -225,7 +269,7 @@ def _stitch_with_gstreamer(
             "faststart=true",
             "!",
             "filesink",
-            f"location={output_path}",
+            f"location={_format_gstreamer_path(output_path)}",
         ]
 
         for index, segment_path in enumerate(segments):
@@ -233,7 +277,7 @@ def _stitch_with_gstreamer(
             concat_command.extend(
                 [
                     "filesrc",
-                    f"location={segment_path.resolve()}",
+                    f"location={_format_gstreamer_path(segment_path)}",
                     "!",
                     "qtdemux",
                     f"name={demux_name}",
@@ -328,7 +372,7 @@ def _extract_last_frame_with_gstreamer(
             "pngenc",
             "!",
             "multifilesink",
-            f"location={frame_pattern}",
+            f"location={_format_gstreamer_path(frame_pattern)}",
         ]
     )
 
@@ -349,14 +393,23 @@ def _extract_last_frame_with_gstreamer(
 
 
 def _ensure_command_available(command_name: str) -> None:
-    if shutil.which(command_name):
+    if resolve_command_path(command_name):
         return
     raise RuntimeError(f"Required command not found in PATH: {command_name}")
 
 
 def _run_command(command: list[str], *, tool_name: str) -> None:
+    resolved_executable = resolve_command_path(command[0]) if command else None
+    if resolved_executable is None:
+        raise RuntimeError(f"Required command not found in PATH: {command[0]}")
+
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
+        subprocess.run(
+            [resolved_executable, *command[1:]],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
     except subprocess.CalledProcessError as exc:
         stderr = (exc.stderr or "").strip()
         stdout = (exc.stdout or "").strip()

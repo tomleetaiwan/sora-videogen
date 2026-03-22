@@ -5,7 +5,13 @@ import subprocess
 from dataclasses import dataclass, field
 
 from app.config import settings
-from app.services.media_backend import GSTREAMER_REQUIRED_ELEMENTS, get_media_backend
+from app.services.media_backend import (
+    GSTREAMER_AAC_ENCODER_CANDIDATES,
+    GSTREAMER_REQUIRED_ELEMENTS,
+    get_media_backend,
+    inspect_gstreamer_element,
+    resolve_command_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +98,14 @@ async def evaluate_startup_media_backend_status() -> MediaBackendStatus:
                     detail=detail,
                 )
             )
+        encoder_success, encoder_detail = await asyncio.to_thread(_inspect_gstreamer_aac_encoder)
+        checks.append(
+            MediaBackendCheck(
+                component_name="AAC encoder",
+                success=encoder_success,
+                detail=encoder_detail,
+            )
+        )
 
     status.checks = checks
     status.ready = all(check.success for check in checks)
@@ -106,13 +120,17 @@ async def evaluate_startup_media_backend_status() -> MediaBackendStatus:
 
 
 def _command_exists(command_name: str) -> bool:
-    return shutil.which(command_name) is not None
+    return resolve_command_path(command_name) is not None
 
 
 def _inspect_gstreamer_element(element_name: str) -> tuple[bool, str]:
+    resolved_command = resolve_command_path(settings.gstreamer_inspect_binary)
+    if resolved_command is None:
+        return False, f"找不到指令 {settings.gstreamer_inspect_binary}。"
+
     try:
         subprocess.run(
-            [settings.gstreamer_inspect_binary, element_name],
+            [resolved_command, element_name],
             check=True,
             capture_output=True,
             text=True,
@@ -124,6 +142,15 @@ def _inspect_gstreamer_element(element_name: str) -> tuple[bool, str]:
         return False, f"找不到指令 {settings.gstreamer_inspect_binary}。"
 
     return True, "GStreamer 插件可用。"
+
+
+def _inspect_gstreamer_aac_encoder() -> tuple[bool, str]:
+    for encoder_name in GSTREAMER_AAC_ENCODER_CANDIDATES:
+        if inspect_gstreamer_element(encoder_name):
+            return True, f"GStreamer AAC encoder 可用：{encoder_name}。"
+
+    candidate_list = "、".join(GSTREAMER_AAC_ENCODER_CANDIDATES)
+    return False, f"找不到可用的 AAC encoder。已檢查：{candidate_list}。"
 
 
 def _summarize_subprocess_error(error: subprocess.CalledProcessError) -> str:

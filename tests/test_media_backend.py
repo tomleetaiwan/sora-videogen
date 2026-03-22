@@ -79,6 +79,50 @@ def test_extract_last_frame_with_gstreamer_uses_sampled_frames(monkeypatch, tmp_
     assert any(part.startswith("location=") and "frame_%05d.png" in part for part in command)
 
 
+def test_stitch_with_gstreamer_uses_first_available_aac_encoder(monkeypatch, tmp_path):
+    video_paths = [tmp_path / "scene.mp4"]
+    audio_paths = [tmp_path / "scene.wav"]
+    output_path = tmp_path / "final.mp4"
+    recorded_commands: list[list[str]] = []
+
+    monkeypatch.setattr(media_backend, "_ensure_command_available", Mock())
+    monkeypatch.setattr(media_backend, "get_available_gstreamer_aac_encoder", lambda: "voaacenc")
+
+    def fake_run_command(command: list[str], *, tool_name: str):
+        recorded_commands.append(command)
+
+    monkeypatch.setattr(media_backend, "_run_command", fake_run_command)
+
+    media_backend._stitch_with_gstreamer(video_paths, audio_paths, output_path)
+
+    assert recorded_commands
+    assert "voaacenc" in recorded_commands[0]
+
+
+def test_get_available_gstreamer_aac_encoder_prefers_first_available(monkeypatch):
+    availability = {
+        "avenc_aac": False,
+        "fdkaacenc": False,
+        "voaacenc": True,
+        "faac": True,
+    }
+
+    monkeypatch.setattr(
+        media_backend,
+        "inspect_gstreamer_element",
+        lambda element_name: availability[element_name],
+    )
+
+    assert media_backend.get_available_gstreamer_aac_encoder() == "voaacenc"
+
+
+def test_get_available_gstreamer_aac_encoder_raises_when_none_found(monkeypatch):
+    monkeypatch.setattr(media_backend, "inspect_gstreamer_element", lambda element_name: False)
+
+    with pytest.raises(RuntimeError, match="No supported GStreamer AAC encoder is available"):
+        media_backend.get_available_gstreamer_aac_encoder()
+
+
 def test_run_command_wraps_called_process_error(monkeypatch):
     def fake_subprocess_run(*args, **kwargs):
         raise subprocess.CalledProcessError(
@@ -88,10 +132,39 @@ def test_run_command_wraps_called_process_error(monkeypatch):
             stderr="boom",
         )
 
+    monkeypatch.setattr(media_backend, "resolve_command_path", lambda command_name: command_name)
     monkeypatch.setattr(media_backend.subprocess, "run", fake_subprocess_run)
 
-    with pytest.raises(RuntimeError, match="gstreamer concat failed: boom"):
+    with pytest.raises(RuntimeError, match="gstreamer concat failed while running 'gst-launch-1.0': boom"):
         media_backend._run_command(["gst-launch-1.0"], tool_name="gstreamer concat")
+
+
+def test_run_command_uses_resolved_executable_path(monkeypatch):
+    recorded_command = None
+
+    def fake_subprocess_run(command, **kwargs):
+        nonlocal recorded_command
+        recorded_command = command
+
+    monkeypatch.setattr(
+        media_backend,
+        "resolve_command_path",
+        lambda command_name: r"C:\gstreamer\bin\gst-launch-1.0.exe",
+    )
+    monkeypatch.setattr(media_backend.subprocess, "run", fake_subprocess_run)
+
+    media_backend._run_command(["gst-launch-1.0", "--version"], tool_name="gstreamer concat")
+
+    assert recorded_command == [r"C:\gstreamer\bin\gst-launch-1.0.exe", "--version"]
+
+
+def test_format_gstreamer_path_uses_forward_slashes(tmp_path):
+    windows_like_path = tmp_path / "nested dir" / "file.wav"
+
+    formatted_path = media_backend._format_gstreamer_path(windows_like_path)
+
+    assert "\\" not in formatted_path
+    assert "/" in formatted_path
 
 
 def test_invalid_media_backend_raises(monkeypatch):

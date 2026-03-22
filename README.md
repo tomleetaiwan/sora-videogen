@@ -238,9 +238,12 @@ GSTREAMER_FRAME_SAMPLE_FPS=2
 
 - `GSTREAMER_LAUNCH_BINARY` 指定的指令是否存在
 - `GSTREAMER_INSPECT_BINARY` 指定的指令是否存在
-- 目前 GStreamer 後端實作需要的元素是否可用，例如 `qtdemux`、`h264parse`、`avenc_aac`、`mp4mux`、`uridecodebin`、`pngenc` 等
+- 目前 GStreamer 後端實作需要的元素是否可用，例如 `qtdemux`、`h264parse`、`mp4mux`、`uridecodebin`、`pngenc` 等
+- 是否至少有一個可用的 AAC encoder，例如 `avenc_aac`、`fdkaacenc`、`voaacenc`、`faac`
 
 若有任一項缺失，首頁會顯示 `GStreamer 媒體後端尚未就緒` 的警示，並列出缺少的指令或插件名稱，讓你在開始生成影片前就能先修正環境。
+
+若 `avenc_aac` 不存在，但其他支援的 AAC encoder 可用，系統會自動回退到可用的 encoder，而不會因為單一插件缺失而直接卡住。這個設計特別適合不同作業系統上 GStreamer plugin 組合不完全一致的情況，例如 macOS。
 
 若未特別設定，系統仍會維持既有 ffmpeg 行為。
 
