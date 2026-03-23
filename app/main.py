@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,6 +13,10 @@ from app.database import engine
 from app.models import Base
 from app.routers import projects, prompts, videos
 from app.services.entra_auth import create_default_entra_auth_status, evaluate_startup_entra_auth_status
+from app.services.media_backend_health import (
+    create_default_media_backend_status,
+    evaluate_startup_media_backend_status,
+)
 from app.services.openai_client import close_openai_client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -22,7 +27,10 @@ async def lifespan(app: FastAPI):
     # 啟動時建立資料表
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    app.state.entra_auth_status = await evaluate_startup_entra_auth_status()
+    app.state.entra_auth_status, app.state.media_backend_status = await asyncio.gather(
+        evaluate_startup_entra_auth_status(),
+        evaluate_startup_media_backend_status(),
+    )
     yield
     await close_openai_client()
     await engine.dispose()
@@ -30,6 +38,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Sora VideoGen", version="0.1.0", lifespan=lifespan)
 app.state.entra_auth_status = create_default_entra_auth_status()
+app.state.media_backend_status = create_default_media_backend_status()
 FAVICON_PATH = Path("app/static/favicon.ico")
 
 

@@ -8,6 +8,7 @@ from app.config import settings
 from app.main import app
 from app.models import Project, ProjectStatus, ScenePrompt, SceneStatus
 from app.services.entra_auth import EntraAuthStatus, EntraTokenCheck
+from app.services.media_backend_health import MediaBackendCheck, MediaBackendStatus
 from app.video_timing import get_max_scene_duration_seconds
 
 
@@ -196,6 +197,34 @@ async def test_index_shows_entra_auth_warning_when_startup_check_failed(client, 
     assert "Microsoft Entra ID 驗證尚未就緒" in response.text
     assert "Azure OpenAI" in response.text
     assert "login required" in response.text
+
+
+@pytest.mark.asyncio
+async def test_index_shows_media_backend_warning_when_gstreamer_check_failed(client, monkeypatch):
+    monkeypatch.setattr(
+        app.state,
+        "media_backend_status",
+        MediaBackendStatus(
+            enabled=True,
+            ready=False,
+            warning_message="啟動時發現 GStreamer 媒體後端尚未就緒。",
+            checks=[
+                MediaBackendCheck(
+                    component_name="avenc_aac",
+                    success=False,
+                    detail="No such element or plugin 'avenc_aac'",
+                )
+            ],
+        ),
+        raising=False,
+    )
+
+    response = await client.get("/projects/")
+
+    assert response.status_code == 200
+    assert "GStreamer 媒體後端尚未就緒" in response.text
+    assert "avenc_aac" in response.text
+    assert "No such element or plugin" in response.text
 
 
 @pytest.mark.asyncio

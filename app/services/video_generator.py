@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from app.config import settings
+from app.services.media_backend import extract_last_frame
 from app.services.openai_client import get_openai_client
 from app.video_timing import get_max_scene_duration_seconds, resolve_video_size
 
@@ -105,38 +106,6 @@ async def _create_video_with_retries(
             continue
 
         return video
-
-
-def extract_last_frame(
-    video_path: Path,
-    output_path: Path,
-    *,
-    effective_duration_seconds: float | None = None,
-) -> Path:
-    """使用 ffmpeg-python 擷取影片最後可見的影格。
-
-    回傳儲存後的影格圖片路徑。
-    """
-    import ffmpeg
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # 探測影片時長
-    probe = ffmpeg.probe(str(video_path))
-    duration = float(probe["format"]["duration"])
-    if effective_duration_seconds is not None:
-        duration = min(duration, effective_duration_seconds)
-
-    # 在接近結尾的位置取出一個影格
-    (
-        ffmpeg.input(str(video_path), ss=max(0, duration - 0.1))
-        .output(str(output_path), vframes=1, format="image2")
-        .overwrite_output()
-        .run(quiet=True)
-    )
-
-    logger.info("Extracted last frame: %s", output_path)
-    return output_path
 
 
 async def generate_video(

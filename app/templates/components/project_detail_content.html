@@ -56,7 +56,7 @@
             hx-swap="outerHTML"
             class="btn btn-primary"
         >{{ "重新串接最終影片" if project.final_video_path else "串接最新影片" }}</button>
-        <p class="project-action-note">ffmpeg 會依目前各分鏡的最新影片與旁白重新輸出單一最終影片。</p>
+        <p class="project-action-note">系統會依目前設定的媒體後端，使用各分鏡的最新影片與旁白重新輸出單一最終影片。</p>
         {% endif %}
     </div>
 

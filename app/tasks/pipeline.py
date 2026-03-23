@@ -400,9 +400,10 @@ async def _regenerate_scene_slice(
 def _collect_scene_media_paths(
     scenes: list[ScenePrompt],
     project_dir: Path,
-) -> tuple[list[Path], list[Path]]:
+) -> tuple[list[Path], list[Path], list[float | None]]:
     video_paths: list[Path] = []
     audio_paths: list[Path] = []
+    scene_durations_seconds: list[float | None] = []
 
     for scene in scenes:
         video_path = _resolve_video_path(project_dir, scene)
@@ -412,8 +413,9 @@ def _collect_scene_media_paths(
 
         video_paths.append(video_path)
         audio_paths.append(audio_path)
+        scene_durations_seconds.append(resolve_video_duration_seconds(scene.duration_estimate))
 
-    return video_paths, audio_paths
+    return video_paths, audio_paths, scene_durations_seconds
 
 
 async def run_pipeline(
@@ -547,10 +549,18 @@ async def run_stitching(project_id: int) -> None:
                 status=ProjectStatus.STITCHING,
             )
             scenes = await _load_project_scenes(session, project_id)
-            video_paths, audio_paths = _collect_scene_media_paths(scenes, project_dir)
+            video_paths, audio_paths, scene_durations_seconds = _collect_scene_media_paths(
+                scenes,
+                project_dir,
+            )
 
             final_path = project_dir / "final_video.mp4"
-            stitch_videos(video_paths, audio_paths, final_path)
+            stitch_videos(
+                video_paths,
+                audio_paths,
+                final_path,
+                scene_durations_seconds=scene_durations_seconds,
+            )
 
             project = await session.get(Project, project_id)
             if project:

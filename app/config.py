@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     azure_speech_resource_id: str = ""
     database_url: str = "sqlite+aiosqlite:///./sora-videogen.db"
     media_dir: Path = Path("./media")
+    media_backend: str = "ffmpeg"
+    gstreamer_launch_binary: str = "gst-launch-1.0"
+    gstreamer_inspect_binary: str = "gst-inspect-1.0"
+    gstreamer_frame_sample_fps: int = 2
 
     # OpenAI 模型
     summarizer_model: str = "gpt-5-mini"
