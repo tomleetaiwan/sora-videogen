@@ -6,6 +6,10 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.models import Project, ProjectStatus, ScenePrompt, SceneStatus
+from app.services.media_backend_health import (
+    MediaBackendStatus,
+    create_default_media_backend_status,
+)
 from app.templating import templates
 from app.tasks.pipeline import (
     get_task_for_project,
@@ -35,10 +39,29 @@ def _all_scenes_completed(project: Project) -> bool:
     return bool(project.scenes) and all(scene.status == SceneStatus.COMPLETED for scene in project.scenes)
 
 
+def _get_media_backend_status(request: Request) -> MediaBackendStatus:
+    return getattr(
+        request.app.state,
+        "media_backend_status",
+        create_default_media_backend_status(),
+    )
+
+
+def _ensure_media_backend_ready(request: Request) -> None:
+    status = _get_media_backend_status(request)
+    if status.enabled and not status.ready:
+        raise HTTPException(
+            status_code=503,
+            detail=status.warning_message or "Configured media backend is not ready",
+        )
+
+
 @router.post("/{project_id}/generate", response_class=HTMLResponse)
 async def trigger_generation(
     request: Request, project_id: int, db: AsyncSession = Depends(get_db)
 ):
+    _ensure_media_backend_ready(request)
+
     if _project_has_active_task(project_id):
         raise HTTPException(status_code=409, detail="Project is already processing another task")
 
@@ -79,6 +102,8 @@ async def trigger_scene_regeneration(
     scene_id: int,
     db: AsyncSession = Depends(get_db),
 ):
+    _ensure_media_backend_ready(request)
+
     if _project_has_active_task(project_id):
         raise HTTPException(status_code=409, detail="Project is already processing another task")
 
@@ -119,6 +144,8 @@ async def trigger_stitching(
     project_id: int,
     db: AsyncSession = Depends(get_db),
 ):
+    _ensure_media_backend_ready(request)
+
     if _project_has_active_task(project_id):
         raise HTTPException(status_code=409, detail="Project is already processing another task")
 

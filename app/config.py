@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     gstreamer_launch_binary: str = "gst-launch-1.0"
     gstreamer_inspect_binary: str = "gst-inspect-1.0"
     gstreamer_frame_sample_fps: int = 2
+    gstreamer_concat_timeout_seconds: int = 300
 
     # OpenAI 模型
     summarizer_model: str = "gpt-5-mini"

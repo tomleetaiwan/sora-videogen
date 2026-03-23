@@ -46,6 +46,7 @@ def test_stitch_videos_dispatches_to_gstreamer(monkeypatch, tmp_path):
         "_prepare_aligned_audio_paths",
         lambda audio_paths, *, output_dir, scene_durations_seconds, frame_count_offset=0: (audio_paths, []),
     )
+    monkeypatch.setattr(media_backend, "get_available_gstreamer_aac_encoder", lambda: "avenc_aac")
     monkeypatch.setattr(media_backend, "_stitch_with_ffmpeg", ffmpeg_mock)
     monkeypatch.setattr(media_backend, "_stitch_with_gstreamer", gstreamer_mock)
 
@@ -148,9 +149,14 @@ def test_stitch_with_gstreamer_uses_first_available_aac_encoder(monkeypatch, tmp
 
     monkeypatch.setattr(media_backend, "_ensure_command_available", Mock())
     monkeypatch.setattr(media_backend, "get_available_gstreamer_aac_encoder", lambda: "voaacenc")
+    monkeypatch.setattr(settings, "gstreamer_concat_timeout_seconds", 123)
 
     def fake_run_command(command: list[str], *, tool_name: str, timeout_seconds=None):
         recorded_commands.append(command)
+        if tool_name == "gstreamer concat":
+            assert timeout_seconds == 123
+        else:
+            assert timeout_seconds is None
 
     monkeypatch.setattr(media_backend, "_run_command", fake_run_command)
 
@@ -304,3 +310,19 @@ def test_invalid_media_backend_raises(monkeypatch):
 
     with pytest.raises(ValueError, match="Unsupported media backend"):
         media_backend.get_media_backend()
+
+
+def test_stitch_with_gstreamer_disables_timeout_when_setting_is_non_positive(monkeypatch, tmp_path):
+    video_paths = [tmp_path / "scene.mp4"]
+    audio_paths = [tmp_path / "scene.wav"]
+    output_path = tmp_path / "final.mp4"
+
+    monkeypatch.setattr(media_backend, "_ensure_command_available", Mock())
+    monkeypatch.setattr(settings, "gstreamer_concat_timeout_seconds", 0)
+
+    def fake_run_command(command: list[str], *, tool_name: str, timeout_seconds=None):
+        assert timeout_seconds is None
+
+    monkeypatch.setattr(media_backend, "_run_command", fake_run_command)
+
+    media_backend._concat_segments_with_gstreamer([tmp_path / "segment.mp4"], output_path)

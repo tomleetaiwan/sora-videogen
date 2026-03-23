@@ -422,6 +422,7 @@ def _create_gstreamer_muxed_segments(
 
 
 def _concat_segments_with_gstreamer(segments: list[Path], output_path: Path) -> None:
+    timeout_seconds = settings.gstreamer_concat_timeout_seconds
     concat_command = [
         settings.gstreamer_launch_binary,
         "-q",
@@ -476,7 +477,11 @@ def _concat_segments_with_gstreamer(segments: list[Path], output_path: Path) -> 
             ]
         )
 
-    _run_command(concat_command, tool_name="gstreamer concat", timeout_seconds=30)
+    _run_command(
+        concat_command,
+        tool_name="gstreamer concat",
+        timeout_seconds=timeout_seconds if timeout_seconds > 0 else None,
+    )
 
 
 def _concat_segments_with_ffmpeg(segments: list[Path], output_path: Path) -> None:
