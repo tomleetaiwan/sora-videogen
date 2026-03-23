@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # 應用程式
     app_host: str = "0.0.0.0"
     app_port: int = 8000
-    max_scenes_per_project: int = 20
+    max_scenes_per_project: int = 300
     scene_duration_seconds: int = 12
     sora_supported_durations_seconds: tuple[int, int, int] = (4, 8, 12)
     sora_supported_sizes: tuple[str, str, str, str] = (

@@ -6,6 +6,11 @@
         "completed": "片段完成",
         "failed": "片段失敗",
     } %}
+    {% set trimmed_narration = prompt.narration_text.strip() %}
+    {% set narration_char_count = trimmed_narration|length %}
+    {% set estimated_narration_seconds = narration_char_count / narration_chars_per_second %}
+    {% set is_narration_over_limit = narration_char_count > max_narration_chars or estimated_narration_seconds > max_scene_duration_seconds %}
+    {% set is_narration_near_limit = (not is_narration_over_limit) and narration_char_count >= (max_narration_chars * 0.85)|round(0, 'floor') %}
     <div class="prompt-header">
         <div class="prompt-header-meta">
             <span class="prompt-order">#{{ prompt.sequence_order + 1 }}</span>
@@ -17,6 +22,7 @@
                 hx-post="/videos/{{ prompt.project_id }}/scenes/{{ prompt.id }}/regenerate"
                 hx-target="#project-detail-content"
                 hx-swap="outerHTML"
+                hx-confirm="重新產生片段前請注意：此內容可能會被系統自動拆分成多個分鏡。確定要繼續嗎？"
                 class="btn btn-secondary btn-sm"
             >重新產生片段</button>
             {% endif %}
@@ -33,9 +39,15 @@
         hx-put="/prompts/{{ prompt.id }}"
         hx-target="#prompt-{{ prompt.id }}"
         hx-swap="outerHTML"
+        data-scene-editor
+        data-max-narration-chars="{{ max_narration_chars }}"
+        data-max-scene-seconds="{{ max_scene_duration_seconds }}"
+        data-chars-per-second="{{ narration_chars_per_second }}"
     >
         <label for="narration-text-{{ prompt.id }}">旁白文字</label>
-        <textarea id="narration-text-{{ prompt.id }}" name="narration_text" rows="3">{{ prompt.narration_text }}</textarea>
+        <textarea id="narration-text-{{ prompt.id }}" name="narration_text" rows="3" maxlength="{{ max_narration_chars }}" class="{{ 'is-invalid' if is_narration_over_limit else '' }}">{{ prompt.narration_text }}</textarea>
+        <p class="prompt-hint {{ 'is-error' if is_narration_over_limit else 'is-warning' if is_narration_near_limit else '' }}" data-narration-feedback aria-live="polite">目前字數：{{ narration_char_count }} 字，預估旁白時長：約 {{ '%.1f'|format(estimated_narration_seconds) }} 秒 / 上限 {{ max_scene_duration_seconds }} 秒（建議不超過 {{ max_narration_chars }} 字）</p>
+        <p class="inline-error-message" data-narration-over-limit {% if not is_narration_over_limit %}hidden{% endif %}>旁白預估時長已超過 {{ max_scene_duration_seconds }} 秒上限，請先縮短內容再儲存。</p>
 
         <label for="video-prompt-{{ prompt.id }}">影片提示詞</label>
         <textarea id="video-prompt-{{ prompt.id }}" name="video_prompt" rows="3">{{ prompt.video_prompt }}</textarea>
@@ -55,7 +67,8 @@
         {% endif %}
 
         <div class="prompt-actions">
-            <button type="submit" class="btn btn-secondary btn-sm">儲存修改</button>
+            <button type="submit" class="btn btn-secondary btn-sm" data-save-prompt-button {% if is_narration_over_limit %}disabled{% endif %}>儲存修改</button>
+            <p class="status-note">儲存前會顯示字數與預估秒數；若超過 {{ max_scene_duration_seconds }} 秒上限，前端會阻止送出。</p>
         </div>
     </form>
 </div>

@@ -79,6 +79,10 @@ async def test_trigger_scene_regeneration_refreshes_project_detail_fragment(
         start_scene_regeneration_mock,
     )
 
+    detail_response = await client.get(f"/projects/{project_id}")
+    assert detail_response.status_code == 200
+    assert "此內容可能會被系統自動拆分成多個分鏡" in detail_response.text
+
     response = await client.post(f"/videos/{project_id}/scenes/{scene_id}/regenerate")
 
     assert response.status_code == 200
