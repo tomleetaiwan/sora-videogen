@@ -17,8 +17,10 @@ logger = logging.getLogger(__name__)
 CHARS_PER_SECOND = 3
 SCENE_DURATION_LIMIT_SECONDS = get_max_scene_duration_seconds()
 MAX_NARRATION_CHARS = estimate_max_narration_chars(CHARS_PER_SECOND)
-MAX_SCENE_PROMPT_ATTEMPTS = 2
+MAX_SCENE_PROMPT_ATTEMPTS = 3
 SCENE_PROMPT_RETRY_DELAY_SECONDS = 3
+SCENE_PROMPT_INITIAL_MAX_COMPLETION_TOKENS = 4000
+SCENE_REWRITE_MAX_COMPLETION_TOKENS = 2000
 
 
 
@@ -185,29 +187,52 @@ def _extract_scene_result(
     response: object,
     *,
     operation_label: str,
-) -> tuple[str | None, str, bool]:
+) -> tuple[str | None, str, bool, bool]:
     choices = getattr(response, "choices", None) or []
     if not choices:
-        return None, f"No {operation_label} choices returned from model", True
+        return None, f"No {operation_label} choices returned from model", True, False
 
     choice = choices[0]
     message = getattr(choice, "message", None)
     raw = _extract_message_text(message)
     if raw:
-        return raw, "", False
+        return raw, "", False, False
 
     refusal = getattr(message, "refusal", None)
     if isinstance(refusal, str) and refusal.strip():
-        return None, f"Model refused during {operation_label}: {refusal.strip()}", False
+        return None, f"Model refused during {operation_label}: {refusal.strip()}", False, False
 
     finish_reason = getattr(choice, "finish_reason", None)
     if finish_reason == "content_filter":
-        return None, f"{operation_label.capitalize()} was blocked by the model content filter", False
+        return None, f"{operation_label.capitalize()} was blocked by the model content filter", False, False
 
     if finish_reason == "length":
-        return None, f"{operation_label.capitalize()} stopped before returning usable JSON", False
+        return None, f"{operation_label.capitalize()} stopped before returning usable JSON", True, True
 
-    return None, f"Empty {operation_label} returned from model", True
+    return None, f"Empty {operation_label} returned from model", True, False
+
+
+def _increase_completion_budget(request_kwargs: dict) -> int | None:
+    token_key = None
+    if "max_completion_tokens" in request_kwargs:
+        token_key = "max_completion_tokens"
+    elif "max_tokens" in request_kwargs:
+        token_key = "max_tokens"
+
+    if token_key is None:
+        return None
+
+    current_budget = request_kwargs.get(token_key)
+    if not isinstance(current_budget, int) or current_budget <= 0:
+        return None
+
+    token_cap = settings.scene_prompt_max_completion_token_cap
+    if token_cap <= 0 or current_budget >= token_cap:
+        return None
+
+    next_budget = min(token_cap, current_budget * 2)
+    request_kwargs[token_key] = next_budget
+    return next_budget
 
 
 async def _request_scene_payload(
@@ -222,7 +247,7 @@ async def _request_scene_payload(
 
     for attempt_number in range(1, MAX_SCENE_PROMPT_ATTEMPTS + 1):
         response = await client.chat.completions.create(**request_kwargs)
-        raw, error_message, retryable = _extract_scene_result(
+        raw, error_message, retryable, token_budget_exhausted = _extract_scene_result(
             response,
             operation_label=operation_label,
         )
@@ -239,18 +264,29 @@ async def _request_scene_payload(
                     f"{operation_label.capitalize()} returned invalid JSON: {exc.msg}"
                 )
                 retryable = True
+                finish_reason = getattr(response.choices[0], "finish_reason", None)
+                token_budget_exhausted = finish_reason == "length"
             except ValueError as exc:
                 error_message = f"{operation_label.capitalize()} returned unusable JSON: {exc}"
                 retryable = True
 
         last_error_message = error_message
         if retryable and attempt_number < MAX_SCENE_PROMPT_ATTEMPTS:
+            expanded_budget = None
+            if token_budget_exhausted:
+                expanded_budget = _increase_completion_budget(request_kwargs)
+
             logger.warning(
-                "%s attempt %d/%d returned no usable content (%s). Retrying in %d seconds.",
+                "%s attempt %d/%d returned no usable content (%s)%s Retrying in %d seconds.",
                 operation_label.capitalize(),
                 attempt_number,
                 MAX_SCENE_PROMPT_ATTEMPTS,
                 error_message,
+                (
+                    f"; increasing completion token budget to {expanded_budget}"
+                    if expanded_budget is not None
+                    else ""
+                ),
                 SCENE_PROMPT_RETRY_DELAY_SECONDS,
             )
             await asyncio.sleep(SCENE_PROMPT_RETRY_DELAY_SECONDS)
@@ -285,7 +321,7 @@ async def generate_scene_prompts(
             {"role": "user", "content": f"請根據以下摘要生成影片場景：\n\n{summary}"},
         ],
         temperature=0.7,
-        max_completion_tokens=4000,
+        max_completion_tokens=SCENE_PROMPT_INITIAL_MAX_COMPLETION_TOKENS,
         response_format={"type": "json_object"},
     )
 
@@ -341,7 +377,7 @@ async def rewrite_or_split_scene(
             },
         ],
         temperature=0.4,
-        max_completion_tokens=2000,
+        max_completion_tokens=SCENE_REWRITE_MAX_COMPLETION_TOKENS,
         response_format={"type": "json_object"},
     )
 

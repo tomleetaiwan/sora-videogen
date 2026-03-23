@@ -296,6 +296,11 @@ h1, h2 { margin-bottom: 1rem; }
     box-shadow: 0 0 0 1px rgba(230, 126, 34, 0.25);
 }
 
+.prompt-card textarea.is-warning:not(.is-invalid) {
+    border-color: #d4a436;
+    box-shadow: 0 0 0 1px rgba(212, 164, 54, 0.22);
+}
+
 .prompt-card label {
     font-size: 0.8rem;
     color: #888;
@@ -320,6 +325,14 @@ h1, h2 { margin-bottom: 1rem; }
     margin: -0.1rem 0 0.75rem;
     color: #ffb0a8;
     font-size: 0.85rem;
+}
+
+[data-video-prompt-risk-feedback] {
+    margin-top: -0.1rem;
+}
+
+[data-video-prompt-risk-feedback]:not([hidden]) {
+    color: #f0c36d;
 }
 
 .scene-metrics {

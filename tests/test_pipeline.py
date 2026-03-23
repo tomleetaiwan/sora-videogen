@@ -1,4 +1,5 @@
 import wave
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -7,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import settings
 from app.models import Project, ProjectStatus, ScenePrompt, SceneStatus, Video
+from app.services import media_backend
 from app.tasks import pipeline
 
 
@@ -353,6 +355,149 @@ async def test_run_scene_regeneration_refreshes_scene_media_and_clears_final_vid
     assert video.last_frame_path is not None and video.last_frame_path.endswith("scene_000\\last_frame.png")
     assert generate_video_mock.await_count == 1
     assert generate_video_mock.await_args.kwargs["reference_image_path"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_scene_regeneration_with_ffmpeg_backend_extracts_last_frame_and_uses_previous_scene_reference(
+    db_engine,
+    monkeypatch,
+    tmp_path,
+):
+    session_factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(settings, "media_dir", tmp_path)
+
+    async with session_factory() as session:
+        project = Project(
+            url="https://example.com/article",
+            status=ProjectStatus.COMPLETED,
+            final_video_path=str(tmp_path / "placeholder" / "old_final_video.mp4"),
+        )
+        session.add(project)
+        await session.flush()
+
+        first_scene = ScenePrompt(
+            project_id=project.id,
+            sequence_order=0,
+            narration_text="第一場旁白",
+            video_prompt="First prompt",
+            duration_estimate=4.0,
+            status=SceneStatus.COMPLETED,
+        )
+        second_scene = ScenePrompt(
+            project_id=project.id,
+            sequence_order=1,
+            narration_text="第二場旁白",
+            video_prompt="Second prompt",
+            duration_estimate=6.0,
+            status=SceneStatus.COMPLETED,
+        )
+        session.add_all([first_scene, second_scene])
+        await session.flush()
+
+        project_dir = tmp_path / str(project.id)
+        first_scene_dir = project_dir / "scene_000"
+        second_scene_dir = project_dir / "scene_001"
+        first_scene_dir.mkdir(parents=True, exist_ok=True)
+        second_scene_dir.mkdir(parents=True, exist_ok=True)
+
+        first_video_path = first_scene_dir / "video.mp4"
+        first_audio_path = first_scene_dir / "narration.wav"
+        first_frame_path = first_scene_dir / "last_frame.png"
+        second_video_path = second_scene_dir / "video.mp4"
+        second_audio_path = second_scene_dir / "narration.wav"
+        second_frame_path = second_scene_dir / "last_frame.png"
+
+        first_video_path.write_bytes(b"first-video")
+        _write_silent_wav(first_audio_path, 4.0)
+        first_frame_path.write_bytes(b"first-frame")
+        second_video_path.write_bytes(b"old-second-video")
+        _write_silent_wav(second_audio_path, 6.0)
+        second_frame_path.write_bytes(b"old-second-frame")
+
+        session.add_all(
+            [
+                Video(
+                    scene_prompt_id=first_scene.id,
+                    video_path=str(first_video_path),
+                    audio_path=str(first_audio_path),
+                    last_frame_path=str(first_frame_path),
+                ),
+                Video(
+                    scene_prompt_id=second_scene.id,
+                    video_path=str(second_video_path),
+                    audio_path=str(second_audio_path),
+                    last_frame_path=str(second_frame_path),
+                ),
+            ]
+        )
+        await session.commit()
+        project_id = project.id
+        scene_id = second_scene.id
+
+    old_final_path = tmp_path / str(project_id) / "final_video.mp4"
+    old_final_path.write_bytes(b"stale-final")
+
+    monkeypatch.setattr(pipeline, "async_session", session_factory)
+    monkeypatch.setattr(settings, "media_backend", "ffmpeg")
+
+    async def fake_generate_narration(text, output_path):
+        _write_silent_wav(output_path, 7.5)
+        return output_path
+
+    recorded_generate_video_kwargs = {}
+
+    async def fake_generate_video(prompt, output_path, **kwargs):
+        recorded_generate_video_kwargs.update(kwargs)
+        output_path.write_bytes(b"new-second-video")
+        return output_path
+
+    recorded_ffmpeg = {}
+
+    class FakeOutput:
+        def overwrite_output(self):
+            return self
+
+        def run(self, quiet=True):
+            Path(recorded_ffmpeg["output_file"]).write_bytes(b"new-second-frame")
+
+    class FakeInput:
+        def output(self, output_file, **kwargs):
+            recorded_ffmpeg["output_file"] = output_file
+            recorded_ffmpeg["output_kwargs"] = kwargs
+            return FakeOutput()
+
+    def fake_ffmpeg_input(path, **kwargs):
+        recorded_ffmpeg["input_path"] = path
+        recorded_ffmpeg["input_kwargs"] = kwargs
+        return FakeInput()
+
+    monkeypatch.setattr(pipeline, "generate_narration", fake_generate_narration)
+    monkeypatch.setattr(pipeline, "generate_video", AsyncMock(side_effect=fake_generate_video))
+    monkeypatch.setattr(media_backend.ffmpeg, "input", fake_ffmpeg_input)
+
+    await pipeline.run_scene_regeneration(project_id, scene_id)
+
+    async with session_factory() as session:
+        project = await session.get(Project, project_id)
+        regenerated_scene = await session.get(ScenePrompt, scene_id)
+        result = await session.execute(select(Video).where(Video.scene_prompt_id == scene_id))
+        regenerated_video = result.scalar_one()
+
+    assert project is not None
+    assert regenerated_scene is not None
+    assert regenerated_video is not None
+    assert project.status == ProjectStatus.COMPLETED
+    assert project.final_video_path is None
+    assert not old_final_path.exists()
+    assert regenerated_scene.status == SceneStatus.COMPLETED
+    assert regenerated_scene.duration_estimate == pytest.approx(7.5, rel=0.01)
+    assert Path(regenerated_video.last_frame_path).read_bytes() == b"new-second-frame"
+    assert recorded_generate_video_kwargs["reference_image_path"] == first_frame_path
+    assert recorded_generate_video_kwargs["duration_seconds"] == 8
+    assert recorded_ffmpeg["input_path"] == str(second_video_path)
+    assert recorded_ffmpeg["input_kwargs"]["ss"] == pytest.approx(7.45)
+    assert recorded_ffmpeg["output_file"] == str(second_frame_path)
+    assert recorded_ffmpeg["output_kwargs"] == {"vframes": 1, "update": 1}
 
 
 @pytest.mark.asyncio

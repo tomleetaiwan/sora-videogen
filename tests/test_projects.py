@@ -125,6 +125,8 @@ async def test_project_detail_shows_actual_audio_and_requested_video_durations(c
     assert 'maxlength="36"' in response.text
     assert "建議不超過 36 字" in response.text
     assert "儲存前會顯示字數與預估秒數" in response.text
+    assert 'data-video-prompt-risk-feedback' in response.text
+    assert "若影片提示詞含真實品牌、清楚 logo 或商標等高風險描述，送出前會先警告" in response.text
 
 
 def test_settings_default_scene_limits():

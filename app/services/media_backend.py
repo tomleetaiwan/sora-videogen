@@ -509,6 +509,34 @@ def _cleanup_paths(paths: list[Path]) -> None:
             logger.warning("Could not remove temporary file because it is still locked: %s", path)
 
 
+def _extract_last_frame_with_ffmpeg(
+    video_path: Path,
+    output_path: Path,
+    *,
+    effective_duration_seconds: float | None = None,
+) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    input_kwargs: dict[str, float] = {}
+    if effective_duration_seconds is not None:
+        input_kwargs["ss"] = max(effective_duration_seconds - 0.05, 0.0)
+
+    try:
+        (
+            ffmpeg.input(str(video_path), **input_kwargs)
+            .output(str(output_path), vframes=1, update=1)
+            .overwrite_output()
+            .run(quiet=True)
+        )
+    except ffmpeg.Error as exc:
+        stderr = exc.stderr.decode("utf-8", errors="ignore").strip() if exc.stderr else ""
+        detail = stderr or "unknown ffmpeg error"
+        raise RuntimeError(f"ffmpeg frame extraction failed for {video_path}: {detail}") from exc
+
+    logger.info("Extracted last frame via ffmpeg: %s", output_path)
+    return output_path
+
+
 def _extract_last_frame_with_gstreamer(
     video_path: Path,
     output_path: Path,

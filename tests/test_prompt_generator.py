@@ -103,6 +103,91 @@ async def test_rewrite_or_split_scene_uses_max_completion_tokens():
 
 
 @pytest.mark.asyncio
+async def test_generate_scene_prompts_retries_with_larger_budget_after_length_truncation():
+    truncated_choice = MagicMock()
+    truncated_choice.message.content = ""
+    truncated_choice.message.refusal = None
+    truncated_choice.finish_reason = "length"
+    truncated_response = MagicMock()
+    truncated_response.choices = [truncated_choice]
+
+    scenes = [{"narration_text": "重試後旁白", "video_prompt": "A recovered scene"}]
+    valid_choice = MagicMock()
+    valid_choice.message.content = json.dumps({"scenes": scenes})
+    valid_choice.message.refusal = None
+    valid_choice.finish_reason = "stop"
+    valid_response = MagicMock()
+    valid_response.choices = [valid_choice]
+
+    with (
+        patch("app.services.prompt_generator.get_openai_client") as mock_get_client,
+        patch.object(prompt_generator_module.asyncio, "sleep", new=AsyncMock()) as mock_sleep,
+    ):
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=[truncated_response, valid_response]
+        )
+        mock_get_client.return_value = mock_client
+
+        result = await generate_scene_prompts("Summary")
+
+    assert len(result) == 1
+    assert result[0]["narration_text"] == "重試後旁白"
+    assert mock_client.chat.completions.create.await_count == 2
+    first_call = mock_client.chat.completions.create.await_args_list[0].kwargs
+    second_call = mock_client.chat.completions.create.await_args_list[1].kwargs
+    assert first_call["max_completion_tokens"] == 4000
+    assert second_call["max_completion_tokens"] == 8000
+    mock_sleep.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_generate_scene_prompts_retries_invalid_json_with_larger_budget_after_length_finish_reason():
+    truncated_choice = MagicMock()
+    truncated_choice.message.content = '{"scenes": ['
+    truncated_choice.message.refusal = None
+    truncated_choice.finish_reason = "length"
+    truncated_response = MagicMock()
+    truncated_response.choices = [truncated_choice]
+
+    scenes = [{"narration_text": "修復後旁白", "video_prompt": "A repaired scene"}]
+    valid_choice = MagicMock()
+    valid_choice.message.content = json.dumps({"scenes": scenes})
+    valid_choice.message.refusal = None
+    valid_choice.finish_reason = "stop"
+    valid_response = MagicMock()
+    valid_response.choices = [valid_choice]
+
+    with (
+        patch("app.services.prompt_generator.get_openai_client") as mock_get_client,
+        patch.object(prompt_generator_module.asyncio, "sleep", new=AsyncMock()) as mock_sleep,
+    ):
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=[truncated_response, valid_response]
+        )
+        mock_get_client.return_value = mock_client
+
+        result = await generate_scene_prompts("Summary")
+
+    assert len(result) == 1
+    assert result[0]["narration_text"] == "修復後旁白"
+    second_call = mock_client.chat.completions.create.await_args_list[1].kwargs
+    assert second_call["max_completion_tokens"] == 8000
+    mock_sleep.assert_awaited_once()
+
+
+def test_increase_completion_budget_uses_configured_cap(monkeypatch):
+    monkeypatch.setattr(settings, "scene_prompt_max_completion_token_cap", 6000)
+    request_kwargs = {"max_completion_tokens": 4000}
+
+    next_budget = prompt_generator_module._increase_completion_budget(request_kwargs)
+
+    assert next_budget == 6000
+    assert request_kwargs["max_completion_tokens"] == 6000
+
+
+@pytest.mark.asyncio
 async def test_rewrite_or_split_scene_infers_chinese_prompt_language_from_current_prompt():
     scenes = [{"narration_text": "拆分後旁白", "video_prompt": "清晨市場，低角度鏡頭"}]
     mock_choice = MagicMock()

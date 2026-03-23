@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     )
     video_generation_max_attempts: int = 2
     video_generation_retry_delay_seconds: int = 45
+    scene_prompt_max_completion_token_cap: int = 24000
 
     @property
     def use_azure_openai(self) -> bool:

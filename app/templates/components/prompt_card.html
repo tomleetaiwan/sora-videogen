@@ -51,6 +51,7 @@
 
         <label for="video-prompt-{{ prompt.id }}">影片提示詞</label>
         <textarea id="video-prompt-{{ prompt.id }}" name="video_prompt" rows="3">{{ prompt.video_prompt }}</textarea>
+        <p class="prompt-hint" data-video-prompt-risk-feedback hidden aria-live="polite"></p>
 
         {% if prompt.duration_estimate %}
         <div class="scene-metrics">
@@ -68,7 +69,7 @@
 
         <div class="prompt-actions">
             <button type="submit" class="btn btn-secondary btn-sm" data-save-prompt-button {% if is_narration_over_limit %}disabled{% endif %}>儲存修改</button>
-            <p class="status-note">儲存前會顯示字數與預估秒數；若超過 {{ max_scene_duration_seconds }} 秒上限，前端會阻止送出。</p>
+            <p class="status-note">儲存前會顯示字數與預估秒數；若超過 {{ max_scene_duration_seconds }} 秒上限，前端會阻止送出。若影片提示詞含真實品牌、清楚 logo 或商標等高風險描述，送出前會先警告。</p>
         </div>
     </form>
 </div>

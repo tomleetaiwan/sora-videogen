@@ -146,6 +146,7 @@ AZURE_SPEECH_USE_ENTRA_ID=false
 - `SORA_VIDEO_SIZE=1280x720`
 - `VIDEO_GENERATION_MAX_ATTEMPTS=2`
 - `VIDEO_GENERATION_RETRY_DELAY_SECONDS=45`
+- `SCENE_PROMPT_MAX_COMPLETION_TOKEN_CAP=24000`
 
 當啟用 Azure OpenAI 時，應用程式會自動把 OpenAI client 切換到 Azure endpoint，並依設定使用 Microsoft Entra ID 或 Azure OpenAI API Key。旁白則一律由 Azure Speech 生成。
 
@@ -203,6 +204,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8765
 - Web UI 會用台灣華語約每秒 `3` 字估算旁白時長，因此預設會提示建議不超過 `36` 字。
 - 這個前端提示屬於預估值；真正生成時，系統仍會以 Azure Speech 合成後的實際 WAV 時長做最終判斷。
 - 若實際旁白時長超過可接受範圍，系統會在影片生成前自動重寫或拆分分鏡；若仍無法符合限制，該次生成會失敗。
+- 若分鏡 JSON 生成因輸出過長而被模型截斷，系統會自動提高 completion token budget 後重試；`SCENE_PROMPT_MAX_COMPLETION_TOKEN_CAP` 可用來限制這個自動擴容的上限。
 
 ## Azure OpenAI 注意事項
 

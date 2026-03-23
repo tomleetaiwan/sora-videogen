@@ -141,6 +141,46 @@ def test_extract_last_frame_with_gstreamer_uses_sampled_frames(monkeypatch, tmp_
     assert any(part.startswith("location=") and "frame_%05d.png" in part for part in command)
 
 
+def test_extract_last_frame_with_ffmpeg_seeks_near_effective_duration(monkeypatch, tmp_path):
+    video_path = tmp_path / "scene.mp4"
+    output_path = tmp_path / "last_frame.png"
+    recorded = {}
+
+    class FakeOutput:
+        def overwrite_output(self):
+            return self
+
+        def run(self, quiet=True):
+            output_path.write_bytes(b"frame")
+
+    class FakeInput:
+        def output(self, output_file, **kwargs):
+            recorded["output_file"] = output_file
+            recorded["output_kwargs"] = kwargs
+            return FakeOutput()
+
+    def fake_input(path, **kwargs):
+        recorded["input_path"] = path
+        recorded["input_kwargs"] = kwargs
+        return FakeInput()
+
+    monkeypatch.setattr(settings, "media_backend", "ffmpeg")
+    monkeypatch.setattr(media_backend.ffmpeg, "input", fake_input)
+
+    result = media_backend.extract_last_frame(
+        video_path,
+        output_path,
+        effective_duration_seconds=3.0,
+    )
+
+    assert result == output_path
+    assert output_path.read_bytes() == b"frame"
+    assert recorded["input_path"] == str(video_path)
+    assert recorded["input_kwargs"]["ss"] == pytest.approx(2.95)
+    assert recorded["output_file"] == str(output_path)
+    assert recorded["output_kwargs"] == {"vframes": 1, "update": 1}
+
+
 def test_stitch_with_gstreamer_uses_first_available_aac_encoder(monkeypatch, tmp_path):
     video_paths = [tmp_path / "scene.mp4"]
     audio_paths = [tmp_path / "scene.wav"]
