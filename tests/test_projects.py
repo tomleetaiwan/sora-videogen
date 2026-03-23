@@ -8,6 +8,7 @@ from app.config import settings
 from app.main import app
 from app.models import Project, ProjectStatus, ScenePrompt, SceneStatus
 from app.services.entra_auth import EntraAuthStatus, EntraTokenCheck
+from app.video_timing import get_max_scene_duration_seconds
 
 
 async def _create_projects(session_factory, urls: list[str]) -> list[int]:
@@ -117,6 +118,47 @@ async def test_project_detail_shows_actual_audio_and_requested_video_durations(c
     assert "實際音訊時長：6.0 秒" in response.text
     assert "請求影片秒數：8 秒" in response.text
     assert "預估旁白時長：6.2 秒" in response.text
+    assert 'data-scene-editor' in response.text
+    assert 'data-max-narration-chars="36"' in response.text
+    assert 'data-max-scene-seconds="12"' in response.text
+    assert 'maxlength="36"' in response.text
+    assert "建議不超過 36 字" in response.text
+    assert "儲存前會顯示字數與預估秒數" in response.text
+
+
+def test_settings_default_scene_limits():
+    assert settings.max_scenes_per_project == 300
+    assert get_max_scene_duration_seconds() == 12
+
+
+@pytest.mark.asyncio
+async def test_project_detail_disables_save_when_narration_exceeds_limit(client, db_engine):
+    session_factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+    over_limit_narration = "超" * 37
+
+    async with session_factory() as session:
+        project = Project(url="https://example.com/article", status=ProjectStatus.PROMPTS_READY)
+        session.add(project)
+        await session.flush()
+        session.add(
+            ScenePrompt(
+                project_id=project.id,
+                sequence_order=0,
+                narration_text=over_limit_narration,
+                video_prompt="Prompt",
+                status=SceneStatus.PENDING,
+            )
+        )
+        await session.commit()
+        project_id = project.id
+
+    response = await client.get(f"/projects/{project_id}")
+
+    assert response.status_code == 200
+    assert 'maxlength="36"' in response.text
+    assert 'data-save-prompt-button disabled' in response.text
+    assert 'class="is-invalid"' in response.text
+    assert "旁白預估時長已超過 12 秒上限" in response.text
 
 
 @pytest.mark.asyncio

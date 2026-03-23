@@ -6,7 +6,7 @@
     <title>{% block title %}Sora VideoGen{% endblock %}</title>
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css?v={{ static_asset_version }}">
 </head>
 <body>
     <header>
@@ -17,6 +17,6 @@
     <main>
         {% block content %}{% endblock %}
     </main>
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v={{ static_asset_version }}"></script>
 </body>
 </html>

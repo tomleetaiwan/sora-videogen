@@ -274,6 +274,11 @@ h1, h2 { margin-bottom: 1rem; }
     margin-top: 0.85rem;
 }
 
+.prompt-actions {
+    justify-content: space-between;
+    flex-wrap: wrap;
+}
+
 .prompt-card textarea {
     width: 100%;
     padding: 0.5rem;
@@ -286,10 +291,35 @@ h1, h2 { margin-bottom: 1rem; }
     resize: vertical;
 }
 
+.prompt-card textarea.is-invalid {
+    border-color: #e67e22;
+    box-shadow: 0 0 0 1px rgba(230, 126, 34, 0.25);
+}
+
 .prompt-card label {
     font-size: 0.8rem;
     color: #888;
     text-transform: uppercase;
+}
+
+.prompt-hint {
+    margin: -0.1rem 0 0.75rem;
+    color: #9fb0d8;
+    font-size: 0.85rem;
+}
+
+.prompt-hint.is-warning {
+    color: #f0c36d;
+}
+
+.prompt-hint.is-error {
+    color: #ffb0a8;
+}
+
+.inline-error-message {
+    margin: -0.1rem 0 0.75rem;
+    color: #ffb0a8;
+    font-size: 0.85rem;
 }
 
 .scene-metrics {
@@ -308,6 +338,11 @@ h1, h2 { margin-bottom: 1rem; }
     border: 1px solid #243455;
     color: #b7c9ff;
     font-size: 0.85rem;
+}
+
+.btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
 }
 
 .progress-bar {
