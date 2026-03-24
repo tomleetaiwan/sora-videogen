@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import settings
 from app.models import Project, ProjectStatus, ScenePrompt, SceneStatus, Video
 from app.services import media_backend
+from app.services.tts import get_audio_duration_seconds
 from app.tasks import pipeline
 
 
@@ -292,7 +293,7 @@ async def test_run_generation_splits_scene_and_resequences_following_scenes(
 
 
 @pytest.mark.asyncio
-async def test_run_scene_regeneration_refreshes_scene_media_and_clears_final_video(
+async def test_run_scene_video_regeneration_refreshes_scene_media_and_clears_final_video(
     db_engine,
     monkeypatch,
     tmp_path,
@@ -317,10 +318,6 @@ async def test_run_scene_regeneration_refreshes_scene_media_and_clears_final_vid
 
     monkeypatch.setattr(pipeline, "async_session", session_factory)
 
-    async def fake_generate_narration(text, output_path):
-        _write_silent_wav(output_path, 7.5)
-        return output_path
-
     async def fake_generate_video(prompt, output_path, **kwargs):
         output_path.write_bytes(b"new-video")
         return output_path
@@ -330,12 +327,13 @@ async def test_run_scene_regeneration_refreshes_scene_media_and_clears_final_vid
         return output_path
 
     generate_video_mock = AsyncMock(side_effect=fake_generate_video)
+    generate_narration_mock = AsyncMock()
 
-    monkeypatch.setattr(pipeline, "generate_narration", fake_generate_narration)
+    monkeypatch.setattr(pipeline, "generate_narration", generate_narration_mock)
     monkeypatch.setattr(pipeline, "generate_video", generate_video_mock)
     monkeypatch.setattr(pipeline, "extract_last_frame", Mock(side_effect=fake_extract_last_frame))
 
-    await pipeline.run_scene_regeneration(project_id, scene_id)
+    await pipeline.run_scene_video_regeneration(project_id, scene_id)
 
     async with session_factory() as session:
         project = await session.get(Project, project_id)
@@ -349,16 +347,17 @@ async def test_run_scene_regeneration_refreshes_scene_media_and_clears_final_vid
     assert project.final_video_path is None
     assert not old_final_path.exists()
     assert scene.status == SceneStatus.COMPLETED
-    assert scene.duration_estimate == pytest.approx(7.5, rel=0.01)
+    assert scene.duration_estimate == pytest.approx(5.0, rel=0.01)
     assert video.video_path is not None and video.video_path.endswith("scene_000\\video.mp4")
     assert video.audio_path is not None and video.audio_path.endswith("scene_000\\narration.wav")
     assert video.last_frame_path is not None and video.last_frame_path.endswith("scene_000\\last_frame.png")
+    generate_narration_mock.assert_not_awaited()
     assert generate_video_mock.await_count == 1
     assert generate_video_mock.await_args.kwargs["reference_image_path"] is None
 
 
 @pytest.mark.asyncio
-async def test_run_scene_regeneration_with_ffmpeg_backend_extracts_last_frame_and_uses_previous_scene_reference(
+async def test_run_scene_video_regeneration_with_ffmpeg_backend_extracts_last_frame_and_uses_previous_scene_reference(
     db_engine,
     monkeypatch,
     tmp_path,
@@ -440,10 +439,6 @@ async def test_run_scene_regeneration_with_ffmpeg_backend_extracts_last_frame_an
     monkeypatch.setattr(pipeline, "async_session", session_factory)
     monkeypatch.setattr(settings, "media_backend", "ffmpeg")
 
-    async def fake_generate_narration(text, output_path):
-        _write_silent_wav(output_path, 7.5)
-        return output_path
-
     recorded_generate_video_kwargs = {}
 
     async def fake_generate_video(prompt, output_path, **kwargs):
@@ -471,11 +466,10 @@ async def test_run_scene_regeneration_with_ffmpeg_backend_extracts_last_frame_an
         recorded_ffmpeg["input_kwargs"] = kwargs
         return FakeInput()
 
-    monkeypatch.setattr(pipeline, "generate_narration", fake_generate_narration)
     monkeypatch.setattr(pipeline, "generate_video", AsyncMock(side_effect=fake_generate_video))
     monkeypatch.setattr(media_backend.ffmpeg, "input", fake_ffmpeg_input)
 
-    await pipeline.run_scene_regeneration(project_id, scene_id)
+    await pipeline.run_scene_video_regeneration(project_id, scene_id)
 
     async with session_factory() as session:
         project = await session.get(Project, project_id)
@@ -490,14 +484,136 @@ async def test_run_scene_regeneration_with_ffmpeg_backend_extracts_last_frame_an
     assert project.final_video_path is None
     assert not old_final_path.exists()
     assert regenerated_scene.status == SceneStatus.COMPLETED
-    assert regenerated_scene.duration_estimate == pytest.approx(7.5, rel=0.01)
+    assert regenerated_scene.duration_estimate == pytest.approx(6.0, rel=0.01)
     assert Path(regenerated_video.last_frame_path).read_bytes() == b"new-second-frame"
     assert recorded_generate_video_kwargs["reference_image_path"] == first_frame_path
     assert recorded_generate_video_kwargs["duration_seconds"] == 8
     assert recorded_ffmpeg["input_path"] == str(second_video_path)
-    assert recorded_ffmpeg["input_kwargs"]["ss"] == pytest.approx(7.45)
+    assert recorded_ffmpeg["input_kwargs"]["ss"] == pytest.approx(5.95)
     assert recorded_ffmpeg["output_file"] == str(second_frame_path)
     assert recorded_ffmpeg["output_kwargs"] == {"vframes": 1, "update": 1}
+
+
+@pytest.mark.asyncio
+async def test_run_scene_audio_regeneration_updates_audio_only_and_clears_final_video(
+    db_engine,
+    monkeypatch,
+    tmp_path,
+):
+    session_factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(settings, "media_dir", tmp_path)
+    project_id, scene_id = await _create_project_with_completed_scene_and_video(
+        session_factory,
+        final_video_path=str(tmp_path / "placeholder" / "old_final_video.mp4"),
+    )
+
+    project_dir = tmp_path / str(project_id)
+    old_final_path = project_dir / "final_video.mp4"
+    old_final_path.parent.mkdir(parents=True, exist_ok=True)
+    old_final_path.write_bytes(b"stale-final")
+
+    scene_dir = project_dir / "scene_000"
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    video_path = scene_dir / "video.mp4"
+    audio_path = scene_dir / "narration.wav"
+    frame_path = scene_dir / "last_frame.png"
+    video_path.write_bytes(b"old-video")
+    _write_silent_wav(audio_path, 5.0)
+    frame_path.write_bytes(b"old-frame")
+
+    monkeypatch.setattr(pipeline, "async_session", session_factory)
+
+    async def fake_generate_narration(text, output_path):
+        _write_silent_wav(output_path, 7.5)
+        return output_path
+
+    generate_narration_mock = AsyncMock(side_effect=fake_generate_narration)
+    generate_video_mock = AsyncMock()
+
+    monkeypatch.setattr(pipeline, "generate_narration", generate_narration_mock)
+    monkeypatch.setattr(pipeline, "generate_video", generate_video_mock)
+
+    await pipeline.run_scene_audio_regeneration(project_id, scene_id)
+
+    async with session_factory() as session:
+        project = await session.get(Project, project_id)
+        scene = await session.get(ScenePrompt, scene_id)
+        result = await session.execute(select(Video).where(Video.scene_prompt_id == scene_id))
+        video = result.scalar_one()
+
+    assert project is not None
+    assert scene is not None
+    assert project.status == ProjectStatus.COMPLETED
+    assert project.final_video_path is None
+    assert not old_final_path.exists()
+    assert scene.status == SceneStatus.COMPLETED
+    assert scene.duration_estimate == pytest.approx(7.5, rel=0.01)
+    assert video.video_path is not None and video.video_path.endswith("scene_000\\video.mp4")
+    assert video.audio_path is not None and video.audio_path.endswith("scene_000\\narration.wav")
+    assert Path(video_path).read_bytes() == b"old-video"
+    assert Path(frame_path).read_bytes() == b"old-frame"
+    assert generate_narration_mock.await_count == 1
+    generate_video_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_scene_audio_regeneration_fails_when_audio_exceeds_current_video_length(
+    db_engine,
+    monkeypatch,
+    tmp_path,
+):
+    session_factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(settings, "media_dir", tmp_path)
+    project_id, scene_id = await _create_project_with_completed_scene_and_video(
+        session_factory,
+        final_video_path=str(tmp_path / "placeholder" / "old_final_video.mp4"),
+    )
+
+    project_dir = tmp_path / str(project_id)
+    old_final_path = project_dir / "final_video.mp4"
+    old_final_path.parent.mkdir(parents=True, exist_ok=True)
+    old_final_path.write_bytes(b"stale-final")
+
+    scene_dir = project_dir / "scene_000"
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    video_path = scene_dir / "video.mp4"
+    audio_path = scene_dir / "narration.wav"
+    frame_path = scene_dir / "last_frame.png"
+    video_path.write_bytes(b"old-video")
+    _write_silent_wav(audio_path, 5.0)
+    frame_path.write_bytes(b"old-frame")
+
+    monkeypatch.setattr(pipeline, "async_session", session_factory)
+
+    async def fake_generate_narration(text, output_path):
+        _write_silent_wav(output_path, 8.5)
+        return output_path
+
+    monkeypatch.setattr(pipeline, "generate_narration", AsyncMock(side_effect=fake_generate_narration))
+    generate_video_mock = AsyncMock()
+    monkeypatch.setattr(pipeline, "generate_video", generate_video_mock)
+
+    await pipeline.run_scene_audio_regeneration(project_id, scene_id)
+
+    async with session_factory() as session:
+        project = await session.get(Project, project_id)
+        scene = await session.get(ScenePrompt, scene_id)
+        result = await session.execute(select(Video).where(Video.scene_prompt_id == scene_id))
+        video = result.scalar_one()
+
+    assert project is not None
+    assert scene is not None
+    assert video is not None
+    assert project.status == ProjectStatus.FAILED
+    assert project.final_video_path is None
+    assert not old_final_path.exists()
+    assert scene.status == SceneStatus.FAILED
+    assert scene.duration_estimate == pytest.approx(6.0, rel=0.01)
+    assert "重新產生的音檔長度超過目前影片長度" in project.error_message
+    assert "重新產生的音檔長度超過目前影片長度" in video.error_message
+    assert Path(audio_path).exists()
+    assert get_audio_duration_seconds(audio_path) == pytest.approx(5.0, rel=0.01)
+    generate_video_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

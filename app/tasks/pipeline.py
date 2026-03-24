@@ -356,7 +356,69 @@ async def _generate_project_scenes(
         scenes = await _load_project_scenes(session, project_id)
 
 
-async def _regenerate_scene_slice(
+def _get_scene_video_duration_seconds(scene: ScenePrompt) -> int | None:
+    return resolve_video_duration_seconds(scene.duration_estimate)
+
+
+async def _generate_scene_video_only(
+    session: AsyncSession,
+    scene: ScenePrompt,
+    project_dir: Path,
+    *,
+    reference_image_path: Path | None,
+) -> Path:
+    audio_path = _resolve_audio_path(project_dir, scene)
+    if audio_path is None:
+        raise ValueError(f"Scene {scene.sequence_order + 1} is missing narration audio")
+
+    actual_duration = get_audio_duration_seconds(audio_path)
+    scene.duration_estimate = actual_duration
+    scene.status = SceneStatus.GENERATING_VIDEO
+
+    video_record = scene.video
+    if video_record is None:
+        video_record = Video(scene_prompt_id=scene.id)
+        session.add(video_record)
+        await session.flush()
+
+    video_record.audio_path = str(audio_path)
+    video_record.video_path = None
+    video_record.last_frame_path = None
+    video_record.error_message = None
+    await session.commit()
+
+    try:
+        scene_dir = _get_scene_dir(project_dir, scene)
+        scene_dir.mkdir(parents=True, exist_ok=True)
+
+        video_path = _get_scene_video_path(project_dir, scene)
+        await generate_video(
+            scene.video_prompt,
+            video_path,
+            reference_image_path=reference_image_path,
+            duration_seconds=resolve_video_duration_seconds(actual_duration),
+        )
+        video_record.video_path = str(video_path)
+
+        frame_path = _get_scene_frame_path(project_dir, scene)
+        extract_last_frame(
+            video_path,
+            frame_path,
+            effective_duration_seconds=actual_duration,
+        )
+        video_record.last_frame_path = str(frame_path)
+
+        scene.status = SceneStatus.COMPLETED
+        await session.commit()
+        return frame_path
+    except Exception as exc:
+        scene.status = SceneStatus.FAILED
+        video_record.error_message = str(exc)
+        await session.commit()
+        raise
+
+
+async def _regenerate_scene_video_slice(
     session: AsyncSession,
     project_id: int,
     scene_id: int,
@@ -377,10 +439,9 @@ async def _regenerate_scene_slice(
     scene_index = current_index
 
     while True:
-        reference_image_path = await _generate_scene_from_index(
+        reference_image_path = await _generate_scene_video_only(
             session,
-            project_id,
-            scene_index,
+            scenes[scene_index],
             project_dir,
             reference_image_path=reference_image_path,
         )
@@ -395,6 +456,56 @@ async def _regenerate_scene_slice(
                 break
 
         scene_index += 1
+
+
+async def _regenerate_scene_audio(
+    session: AsyncSession,
+    project_id: int,
+    scene_id: int,
+    project_dir: Path,
+) -> None:
+    scenes = await _load_project_scenes(session, project_id)
+    scene = next((candidate for candidate in scenes if candidate.id == scene_id), None)
+    if scene is None:
+        raise ValueError(f"Scene {scene_id} no longer exists")
+
+    current_video_path = _resolve_video_path(project_dir, scene)
+    current_video_duration_seconds = _get_scene_video_duration_seconds(scene)
+    if current_video_path is None or current_video_duration_seconds is None:
+        raise ValueError(f"Scene {scene.sequence_order + 1} is missing current video")
+
+    video_record = scene.video
+    if video_record is None:
+        raise ValueError(f"Scene {scene.sequence_order + 1} is missing generated media record")
+
+    scene_dir = _get_scene_dir(project_dir, scene)
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    target_audio_path = _get_scene_audio_path(project_dir, scene)
+    temp_audio_path = scene_dir / "narration.regenerated.wav"
+    temp_audio_path.unlink(missing_ok=True)
+
+    scene.status = SceneStatus.GENERATING_AUDIO
+    video_record.error_message = None
+    await session.commit()
+
+    try:
+        await generate_narration(scene.narration_text, temp_audio_path)
+        actual_duration = get_audio_duration_seconds(temp_audio_path)
+        if actual_duration > current_video_duration_seconds:
+            raise ValueError(
+                "重新產生的音檔長度超過目前影片長度："
+                f"{actual_duration:.2f} 秒 > {current_video_duration_seconds:.2f} 秒"
+            )
+
+        temp_audio_path.replace(target_audio_path)
+        scene.duration_estimate = actual_duration
+        scene.status = SceneStatus.COMPLETED
+        video_record.audio_path = str(target_audio_path)
+        video_record.error_message = None
+        await session.commit()
+    except Exception:
+        temp_audio_path.unlink(missing_ok=True)
+        raise
 
 
 def _collect_scene_media_paths(
@@ -505,8 +616,8 @@ async def run_generation(project_id: int) -> None:
         _running_tasks.pop(project_id, None)
 
 
-async def run_scene_regeneration(project_id: int, scene_id: int) -> None:
-    """重新生成單一分鏡，以及自動拆分後的後續分鏡。"""
+async def run_scene_video_regeneration(project_id: int, scene_id: int) -> None:
+    """重新生成單一分鏡影片，並同步更新自動拆分出的後續分鏡影片。"""
     project_dir = settings.media_dir / str(project_id)
     project_dir.mkdir(parents=True, exist_ok=True)
 
@@ -518,12 +629,47 @@ async def run_scene_regeneration(project_id: int, scene_id: int) -> None:
                 project_dir,
                 status=ProjectStatus.GENERATING,
             )
-            await _regenerate_scene_slice(session, project_id, scene_id, project_dir)
+            await _regenerate_scene_video_slice(session, project_id, scene_id, project_dir)
             await _finalize_project_after_partial_generation(session, project_id)
 
     except Exception as e:
-        logger.exception("Scene regeneration failed for project %d scene %d", project_id, scene_id)
+        logger.exception(
+            "Scene video regeneration failed for project %d scene %d", project_id, scene_id
+        )
         async with async_session() as session:
+            await _update_project_status(session, project_id, ProjectStatus.FAILED, str(e))
+    finally:
+        _running_tasks.pop(project_id, None)
+
+
+async def run_scene_audio_regeneration(project_id: int, scene_id: int) -> None:
+    """重新生成單一分鏡旁白音檔，但保留既有影片。"""
+    project_dir = settings.media_dir / str(project_id)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        async with async_session() as session:
+            await _prepare_project_for_media_refresh(
+                session,
+                project_id,
+                project_dir,
+                status=ProjectStatus.GENERATING,
+            )
+            await _regenerate_scene_audio(session, project_id, scene_id, project_dir)
+            await _finalize_project_after_partial_generation(session, project_id)
+
+    except Exception as e:
+        logger.exception(
+            "Scene audio regeneration failed for project %d scene %d", project_id, scene_id
+        )
+        async with async_session() as session:
+            scenes = await _load_project_scenes(session, project_id)
+            scene = next((candidate for candidate in scenes if candidate.id == scene_id), None)
+            if scene is not None:
+                scene.status = SceneStatus.FAILED
+                if scene.video is not None:
+                    scene.video.error_message = str(e)
+                await session.commit()
             await _update_project_status(session, project_id, ProjectStatus.FAILED, str(e))
     finally:
         _running_tasks.pop(project_id, None)
@@ -600,9 +746,18 @@ def start_generation(project_id: int) -> asyncio.Task:
     return task
 
 
-def start_scene_regeneration(project_id: int, scene_id: int) -> asyncio.Task:
-    """以背景任務方式啟動單一分鏡重生。"""
-    task = asyncio.create_task(run_scene_regeneration(project_id, scene_id))
+def start_scene_video_regeneration(project_id: int, scene_id: int) -> asyncio.Task:
+    """以背景任務方式啟動單一分鏡影片重生。"""
+    task = asyncio.create_task(run_scene_video_regeneration(project_id, scene_id))
+
+
+    _running_tasks[project_id] = task
+    return task
+
+
+def start_scene_audio_regeneration(project_id: int, scene_id: int) -> asyncio.Task:
+    """以背景任務方式啟動單一分鏡音檔重生。"""
+    task = asyncio.create_task(run_scene_audio_regeneration(project_id, scene_id))
     _running_tasks[project_id] = task
     return task
 

@@ -48,7 +48,7 @@ async def test_trigger_generation_refreshes_project_detail_fragment(
 
 
 @pytest.mark.asyncio
-async def test_trigger_scene_regeneration_refreshes_project_detail_fragment(
+async def test_trigger_scene_video_regeneration_refreshes_project_detail_fragment(
     client,
     db_engine,
     monkeypatch,
@@ -75,23 +75,67 @@ async def test_trigger_scene_regeneration_refreshes_project_detail_fragment(
         project_id = project.id
         scene_id = scene.id
 
-    start_scene_regeneration_mock = Mock()
+    start_scene_video_regeneration_mock = Mock()
     monkeypatch.setattr(
-        "app.routers.videos.start_scene_regeneration",
-        start_scene_regeneration_mock,
+        "app.routers.videos.start_scene_video_regeneration",
+        start_scene_video_regeneration_mock,
     )
 
     detail_response = await client.get(f"/projects/{project_id}")
     assert detail_response.status_code == 200
-    assert "此內容可能會被系統自動拆分成多個分鏡" in detail_response.text
+    assert "重新產生影片" in detail_response.text
+    assert "重新產生音檔" in detail_response.text
 
-    response = await client.post(f"/videos/{project_id}/scenes/{scene_id}/regenerate")
+    response = await client.post(f"/videos/{project_id}/scenes/{scene_id}/regenerate-video")
 
     assert response.status_code == 200
     assert 'id="project-detail-content"' in response.text
     assert response.text.count(f'hx-get="/projects/{project_id}/content"') == 1
     assert response.text.count(f'hx-post="/videos/{project_id}/stitch"') == 0
-    start_scene_regeneration_mock.assert_called_once_with(project_id, scene_id)
+    start_scene_video_regeneration_mock.assert_called_once_with(project_id, scene_id)
+
+
+@pytest.mark.asyncio
+async def test_trigger_scene_audio_regeneration_refreshes_project_detail_fragment(
+    client,
+    db_engine,
+    monkeypatch,
+):
+    session_factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with session_factory() as session:
+        project = Project(
+            url="https://example.com/article",
+            status=ProjectStatus.COMPLETED,
+            final_video_path="media/1/final_video.mp4",
+        )
+        session.add(project)
+        await session.flush()
+        scene = ScenePrompt(
+            project_id=project.id,
+            sequence_order=0,
+            narration_text="場景旁白",
+            video_prompt="A cinematic scene",
+            status=SceneStatus.COMPLETED,
+        )
+        session.add(scene)
+        await session.commit()
+        project_id = project.id
+        scene_id = scene.id
+
+    start_scene_audio_regeneration_mock = Mock()
+    monkeypatch.setattr(
+        "app.routers.videos.start_scene_audio_regeneration",
+        start_scene_audio_regeneration_mock,
+    )
+
+    response = await client.post(f"/videos/{project_id}/scenes/{scene_id}/regenerate-audio")
+
+    assert response.status_code == 200
+    assert 'id="project-detail-content"' in response.text
+    assert response.text.count(f'hx-get="/projects/{project_id}/content"') == 1
+    assert response.text.count(f'hx-post="/videos/{project_id}/stitch"') == 0
+    start_scene_audio_regeneration_mock.assert_called_once_with(project_id, scene_id)
 
 
 @pytest.mark.asyncio
@@ -218,7 +262,7 @@ async def test_trigger_generation_rejects_when_media_backend_not_ready(
 
 
 @pytest.mark.asyncio
-async def test_trigger_scene_regeneration_rejects_when_media_backend_not_ready(
+async def test_trigger_scene_video_regeneration_rejects_when_media_backend_not_ready(
     client,
     db_engine,
     monkeypatch,
@@ -251,17 +295,64 @@ async def test_trigger_scene_regeneration_rejects_when_media_backend_not_ready(
         ),
         raising=False,
     )
-    start_scene_regeneration_mock = Mock()
+    start_scene_video_regeneration_mock = Mock()
     monkeypatch.setattr(
-        "app.routers.videos.start_scene_regeneration",
-        start_scene_regeneration_mock,
+        "app.routers.videos.start_scene_video_regeneration",
+        start_scene_video_regeneration_mock,
     )
 
-    response = await client.post(f"/videos/{project_id}/scenes/{scene_id}/regenerate")
+    response = await client.post(f"/videos/{project_id}/scenes/{scene_id}/regenerate-video")
 
     assert response.status_code == 503
     assert response.json()["detail"] == "啟動時發現 GStreamer 媒體後端尚未就緒。"
-    start_scene_regeneration_mock.assert_not_called()
+    start_scene_video_regeneration_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_trigger_scene_audio_regeneration_rejects_when_media_backend_not_ready(
+    client,
+    db_engine,
+    monkeypatch,
+):
+    session_factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with session_factory() as session:
+        project = Project(url="https://example.com/article", status=ProjectStatus.COMPLETED)
+        session.add(project)
+        await session.flush()
+        scene = ScenePrompt(
+            project_id=project.id,
+            sequence_order=0,
+            narration_text="場景旁白",
+            video_prompt="A cinematic scene",
+            status=SceneStatus.COMPLETED,
+        )
+        session.add(scene)
+        await session.commit()
+        project_id = project.id
+        scene_id = scene.id
+
+    monkeypatch.setattr(
+        app.state,
+        "media_backend_status",
+        MediaBackendStatus(
+            enabled=True,
+            ready=False,
+            warning_message="啟動時發現 GStreamer 媒體後端尚未就緒。",
+        ),
+        raising=False,
+    )
+    start_scene_audio_regeneration_mock = Mock()
+    monkeypatch.setattr(
+        "app.routers.videos.start_scene_audio_regeneration",
+        start_scene_audio_regeneration_mock,
+    )
+
+    response = await client.post(f"/videos/{project_id}/scenes/{scene_id}/regenerate-audio")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "啟動時發現 GStreamer 媒體後端尚未就緒。"
+    start_scene_audio_regeneration_mock.assert_not_called()
 
 
 @pytest.mark.asyncio

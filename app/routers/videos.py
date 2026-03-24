@@ -14,7 +14,8 @@ from app.templating import templates
 from app.tasks.pipeline import (
     get_task_for_project,
     start_generation,
-    start_scene_regeneration,
+    start_scene_audio_regeneration,
+    start_scene_video_regeneration,
     start_stitching,
 )
 
@@ -95,11 +96,12 @@ async def trigger_generation(
     )
 
 
-@router.post("/{project_id}/scenes/{scene_id}/regenerate", response_class=HTMLResponse)
-async def trigger_scene_regeneration(
+async def _trigger_scene_regeneration(
     request: Request,
     project_id: int,
     scene_id: int,
+    *,
+    start_regeneration,
     db: AsyncSession = Depends(get_db),
 ):
     _ensure_media_backend_ready(request)
@@ -125,7 +127,7 @@ async def trigger_scene_regeneration(
     project.final_video_path = None
     project.error_message = None
     await db.commit()
-    start_scene_regeneration(project_id, scene_id)
+    start_regeneration(project_id, scene_id)
 
     project = await _load_project_with_scenes(db, project_id)
     if not project:
@@ -135,6 +137,38 @@ async def trigger_scene_regeneration(
         request=request,
         name="components/project_detail_content.html",
         context={"project": project},
+    )
+
+
+@router.post("/{project_id}/scenes/{scene_id}/regenerate-video", response_class=HTMLResponse)
+async def trigger_scene_video_regeneration(
+    request: Request,
+    project_id: int,
+    scene_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    return await _trigger_scene_regeneration(
+        request,
+        project_id,
+        scene_id,
+        start_regeneration=start_scene_video_regeneration,
+        db=db,
+    )
+
+
+@router.post("/{project_id}/scenes/{scene_id}/regenerate-audio", response_class=HTMLResponse)
+async def trigger_scene_audio_regeneration(
+    request: Request,
+    project_id: int,
+    scene_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    return await _trigger_scene_regeneration(
+        request,
+        project_id,
+        scene_id,
+        start_regeneration=start_scene_audio_regeneration,
+        db=db,
     )
 
 

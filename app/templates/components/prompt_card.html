@@ -13,6 +13,7 @@
     {% set estimated_narration_seconds = narration_char_count / narration_chars_per_second %}
     {% set is_narration_over_limit = narration_char_count > max_narration_chars or estimated_narration_seconds > max_scene_duration_seconds %}
     {% set is_narration_near_limit = (not is_narration_over_limit) and narration_char_count >= (max_narration_chars * 0.85)|round(0, 'floor') %}
+    {% set current_video_duration = resolve_video_duration_seconds(prompt.duration_estimate) if prompt.duration_estimate else none %}
     <div class="prompt-header">
         <div class="prompt-header-meta">
             <span class="prompt-order">#{{ prompt.sequence_order + 1 }}</span>
@@ -21,12 +22,19 @@
         <div class="prompt-header-actions">
             {% if prompt.status.value in ["completed", "failed"] and project.status.value not in ["generating", "stitching"] %}
             <button
-                hx-post="/videos/{{ prompt.project_id }}/scenes/{{ prompt.id }}/regenerate"
+                hx-post="/videos/{{ prompt.project_id }}/scenes/{{ prompt.id }}/regenerate-video"
                 hx-target="#project-detail-content"
                 hx-swap="outerHTML"
-                hx-confirm="重新產生片段前請注意：此內容可能會被系統自動拆分成多個分鏡。確定要繼續嗎？"
+                hx-confirm="重新產生影片會沿用目前旁白。確定要繼續嗎？"
                 class="btn btn-secondary btn-sm"
-            >重新產生片段</button>
+            >重新產生影片</button>
+            <button
+                hx-post="/videos/{{ prompt.project_id }}/scenes/{{ prompt.id }}/regenerate-audio"
+                hx-target="#project-detail-content"
+                hx-swap="outerHTML"
+                hx-confirm="重新產生音檔後，若長度超過目前影片長度會失敗。確定要繼續嗎？"
+                class="btn btn-secondary btn-sm"
+            >重新產生音檔</button>
             {% endif %}
             <button
                 hx-delete="/prompts/{{ prompt.id }}"
@@ -76,7 +84,9 @@
 
         <div class="prompt-actions">
             <button type="submit" class="btn btn-secondary btn-sm" data-save-prompt-button {% if is_narration_over_limit %}disabled{% endif %}>儲存修改</button>
-            <p class="status-note">儲存前會顯示字數與預估秒數；若超過 {{ max_scene_duration_seconds }} 秒上限，前端會阻止送出。若影片提示詞含真實品牌、清楚 logo 或商標等高風險描述，送出前會先警告。</p>
+            {% if current_video_duration and prompt.status.value in ["completed", "failed"] %}
+            <p class="status-note">目前影片長度：{{ current_video_duration }} 秒。重新產生音檔時，新的旁白不可超過這個長度。</p>
+            {% endif %}
         </div>
     </form>
 </div>
