@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 
 from app.config import settings
 from app.prompt_language import (
@@ -21,6 +22,45 @@ MAX_SCENE_PROMPT_ATTEMPTS = 3
 SCENE_PROMPT_RETRY_DELAY_SECONDS = 3
 SCENE_PROMPT_INITIAL_MAX_COMPLETION_TOKENS = 4000
 SCENE_REWRITE_MAX_COMPLETION_TOKENS = 2000
+RISKY_LOGO_PATTERN = re.compile(
+    r"(清晰|清楚|明顯|可辨識|顯眼|醒目|visible|clear(?:ly)?\s+visible|recognizable).{0,8}(logo|標誌|商標|招牌)|\b(logo|logos|trademark|brand mark|wordmark)\b|品牌標誌|企業標誌|商標字樣|招牌字樣",
+    re.IGNORECASE,
+)
+RISKY_BRAND_PATTERN = re.compile(
+    r"(apple|google|meta|tesla|microsoft|amazon|openai|nvidia|nike|adidas|starbucks|coca-?cola|mcdonald'?s|samsung|sony|intel|amd|asus|acer|mediatek|foxconn|tsmc|鴻海|富士康|台積電|蘋果|谷歌|微軟|亞馬遜|特斯拉|輝達|耐吉|愛迪達|星巴克|可口可樂|麥當勞|三星|索尼|英特爾|華碩|宏碁|聯發科)",
+    re.IGNORECASE,
+)
+
+
+def detect_video_prompt_risks(text: str) -> list[str]:
+    normalized_text = text.strip()
+    if not normalized_text:
+        return []
+
+    risks: list[str] = []
+    if RISKY_BRAND_PATTERN.search(normalized_text):
+        risks.append("提到可能可辨識的真實品牌或公司名稱")
+    if RISKY_LOGO_PATTERN.search(normalized_text):
+        risks.append("提到清楚 logo、商標或品牌標誌")
+
+    return risks
+
+
+def _build_video_prompt_safety_instruction(video_prompt_language: str) -> str:
+    if video_prompt_language == "en":
+        return (
+            "Avoid content likely to violate Sora 2 model rules. Do not mention real brands, "
+            "company names, product names, trademarks, logos, storefront signs, wordmarks, or "
+            "instructions that ask for clearly visible or recognizable brand identifiers. Replace "
+            "them with generic descriptions such as a major technology company office building or "
+            "a cafe storefront without visible branding."
+        )
+
+    return (
+        "避免產生可能觸發 Sora 2 模型規範的內容。不要描述真實品牌、公司名稱、產品名稱、"
+        "商標、logo、招牌、字標，也不要要求畫面出現清楚可辨識的品牌識別；請一律改寫成泛化"
+        "場景，例如「大型科技公司辦公大樓」或「不出現可辨識品牌的咖啡店門面」。"
+    )
 
 
 
@@ -53,6 +93,7 @@ For each scene, provide:
 Return JSON in the shape {{"scenes": [{{"narration_text": "...", "video_prompt": "..."}}]}} only.
 Limit to at most {settings.max_scenes_per_project} scenes.
 Ensure scenes flow naturally and tell a cohesive story.
+{_build_video_prompt_safety_instruction(video_prompt_language)}
 """
 
 
@@ -72,6 +113,7 @@ Rules:
 7. Aim for roughly {MAX_NARRATION_CHARS} Chinese characters or fewer per scene, but prioritize
    natural pacing over character counting.
 8. Return JSON in the shape {{"scenes": [ ... ]}} only.
+9. {_build_video_prompt_safety_instruction(video_prompt_language)}
 """
 
 
@@ -109,6 +151,13 @@ def _normalize_scene_payloads(
         if not narration or not video_prompt:
             logger.warning("Skipping scene %d: missing fields", i)
             continue
+
+        video_prompt_risks = detect_video_prompt_risks(video_prompt)
+        if video_prompt_risks:
+            raise ValueError(
+                "Generated video prompt contains content that should be avoided for Sora 2: "
+                + "、".join(video_prompt_risks)
+            )
 
         normalized.append({
             # 保留完整旁白文字；真正的硬上限會在 TTS 後以實際音訊時長判定。

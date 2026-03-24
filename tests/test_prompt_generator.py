@@ -5,7 +5,11 @@ import pytest
 
 from app.config import settings
 from app.services import prompt_generator as prompt_generator_module
-from app.services.prompt_generator import generate_scene_prompts, rewrite_or_split_scene
+from app.services.prompt_generator import (
+    detect_video_prompt_risks,
+    generate_scene_prompts,
+    rewrite_or_split_scene,
+)
 
 
 @pytest.mark.asyncio
@@ -31,6 +35,7 @@ async def test_generate_scene_prompts_returns_scenes():
     assert "duration_estimate" in result[0]
     _, kwargs = mock_client.chat.completions.create.await_args
     assert "Traditional Chinese (繁體中文) prompt for the Sora 2 video model" in kwargs["messages"][0]["content"]
+    assert "避免產生可能觸發 Sora 2 模型規範的內容" in kwargs["messages"][0]["content"]
     assert 'Return JSON in the shape {"scenes": [{"narration_text": "...", "video_prompt": "..."}]}' in kwargs["messages"][0]["content"]
     assert kwargs["max_completion_tokens"] == 4000
     assert "max_tokens" not in kwargs
@@ -72,6 +77,7 @@ async def test_generate_scene_prompts_supports_english_video_prompts():
 
     _, kwargs = mock_client.chat.completions.create.await_args
     assert '2. "video_prompt": An English prompt for the Sora 2 video model' in kwargs["messages"][0]["content"]
+    assert "Avoid content likely to violate Sora 2 model rules" in kwargs["messages"][0]["content"]
 
 
 @pytest.mark.asyncio
@@ -187,6 +193,13 @@ def test_increase_completion_budget_uses_configured_cap(monkeypatch):
     assert request_kwargs["max_completion_tokens"] == 6000
 
 
+def test_detect_video_prompt_risks_flags_brand_and_logo_references():
+    risks = detect_video_prompt_risks("A storefront with a clearly visible Apple logo above the entrance")
+
+    assert "提到可能可辨識的真實品牌或公司名稱" in risks
+    assert "提到清楚 logo、商標或品牌標誌" in risks
+
+
 @pytest.mark.asyncio
 async def test_rewrite_or_split_scene_infers_chinese_prompt_language_from_current_prompt():
     scenes = [{"narration_text": "拆分後旁白", "video_prompt": "清晨市場，低角度鏡頭"}]
@@ -210,6 +223,7 @@ async def test_rewrite_or_split_scene_infers_chinese_prompt_language_from_curren
 
     _, kwargs = mock_client.chat.completions.create.await_args
     assert "Traditional Chinese (繁體中文) prompt for the Sora 2 video model" in kwargs["messages"][0]["content"]
+    assert "避免產生可能觸發 Sora 2 模型規範的內容" in kwargs["messages"][0]["content"]
     assert "Current video prompt (Traditional Chinese):" in kwargs["messages"][1]["content"]
 
 
@@ -265,5 +279,41 @@ async def test_generate_scene_prompts_retries_after_empty_response():
 
     assert len(result) == 1
     assert result[0]["narration_text"] == "重試後旁白"
+    assert mock_client.chat.completions.create.await_count == 2
+    mock_sleep.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_generate_scene_prompts_retries_when_generated_prompt_contains_risky_branding():
+    risky_scenes = [{"narration_text": "旁白", "video_prompt": "Apple store lobby with a clearly visible logo"}]
+    risky_choice = MagicMock()
+    risky_choice.message.content = json.dumps({"scenes": risky_scenes})
+    risky_choice.message.refusal = None
+    risky_choice.finish_reason = "stop"
+    risky_response = MagicMock()
+    risky_response.choices = [risky_choice]
+
+    safe_scenes = [{"narration_text": "修正後旁白", "video_prompt": "A modern electronics retail lobby without visible branding"}]
+    safe_choice = MagicMock()
+    safe_choice.message.content = json.dumps({"scenes": safe_scenes})
+    safe_choice.message.refusal = None
+    safe_choice.finish_reason = "stop"
+    safe_response = MagicMock()
+    safe_response.choices = [safe_choice]
+
+    with (
+        patch("app.services.prompt_generator.get_openai_client") as mock_get_client,
+        patch.object(prompt_generator_module.asyncio, "sleep", new=AsyncMock()) as mock_sleep,
+    ):
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=[risky_response, safe_response]
+        )
+        mock_get_client.return_value = mock_client
+
+        result = await generate_scene_prompts("Summary")
+
+    assert len(result) == 1
+    assert result[0]["video_prompt"] == "A modern electronics retail lobby without visible branding"
     assert mock_client.chat.completions.create.await_count == 2
     mock_sleep.assert_awaited_once()

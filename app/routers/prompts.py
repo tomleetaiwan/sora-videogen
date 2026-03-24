@@ -6,6 +6,7 @@ from sqlalchemy.orm import joinedload, selectinload
 
 from app.database import get_db
 from app.models import ScenePrompt
+from app.services.prompt_generator import detect_video_prompt_risks
 from app.templating import templates
 
 router = APIRouter(prefix="/prompts", tags=["prompts"])
@@ -39,12 +40,33 @@ async def update_prompt(request: Request, prompt_id: int, db: AsyncSession = Dep
         raise HTTPException(status_code=404, detail="Prompt not found")
 
     form = await request.form()
-    if narration := form.get("narration_text"):
-        prompt.narration_text = str(narration)
-    if video_prompt := form.get("video_prompt"):
-        prompt.video_prompt = str(video_prompt)
-    if order := form.get("sequence_order"):
-        prompt.sequence_order = int(order)
+    form_values = {
+        "narration_text": str(form.get("narration_text", prompt.narration_text)),
+        "video_prompt": str(form.get("video_prompt", prompt.video_prompt)),
+        "sequence_order": str(form.get("sequence_order", prompt.sequence_order)),
+    }
+
+    video_prompt_risks = detect_video_prompt_risks(form_values["video_prompt"])
+    if video_prompt_risks:
+        return templates.TemplateResponse(
+            request=request,
+            name="components/prompt_card.html",
+            context={
+                "prompt": prompt,
+                "project": prompt.project,
+                "form_values": form_values,
+                "video_prompt_error": (
+                    "影片提示詞包含後端禁止儲存的高風險描述："
+                    + "、".join(video_prompt_risks)
+                    + "。請改成泛化場景，例如「大型科技公司辦公室」或「不出現可辨識品牌的店面」。"
+                ),
+            },
+            status_code=400,
+        )
+
+    prompt.narration_text = form_values["narration_text"]
+    prompt.video_prompt = form_values["video_prompt"]
+    prompt.sequence_order = int(form_values["sequence_order"])
 
     return templates.TemplateResponse(
         request=request,
